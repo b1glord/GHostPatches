@@ -51,5 +51,5 @@ Keep in mind that the time is given in the UNIX TIMESTAMP. This does mean the va
 - 1 DAY: 86400
 - 1 WEEK: 604800
 - 1 MONTH: 2419200
-- 
+
 The can be multiplied and replaced on the number.
