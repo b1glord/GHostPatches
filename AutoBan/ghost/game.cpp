@@ -78,6 +78,53 @@ CGame :: CGame( CGHost *nGHost, CMap *nMap, CSaveGame *nSaveGame, uint16_t nHost
 
 CGame :: ~CGame( )
 {
+    // autoban
+    uint32_t EndTime = m_GameTicks / 1000;
+    for( vector<CDBGamePlayer *> :: iterator i = m_DBGamePlayers.begin( ); i != m_DBGamePlayers.end( ); ++i )
+    {
+            if( IsAutoBanned( (*i)->GetName( ) ) )
+            {
+                    bool isAdmin = false;
+                    for( vector<CBNET *> :: iterator k = m_GHost->m_BNETs.begin( ); k != m_GHost->m_BNETs.end( ); ++k )
+                    {
+                           if( (*k)->GetServer( ) == (*i)->GetSpoofedRealm( ) )
+                           {
+                                   if( (*k)->IsAdmin( (*i)->GetName( ) ) ) {
+                                        isAdmin = true;
+                                   }
+                                   break;
+                           }
+                    }
+
+                    uint32_t LeftTime = (*i)->GetLeft( );
+                    // make sure that draw games will not ban people who didnt leave.
+                    if( EndTime - LeftTime > 300 )
+                    {
+                            if(! isAdmin )
+                            {
+                                string Reason = "disconnected at";
+                                if((*i)->GetLeftReason( ).find("left")!=string::npos)
+                                    Reason = "left at ";
+
+                                if( EndTime < 300 ) {
+                                    Reason += UTIL_ToString( LeftTime/60 ) + "/" + UTIL_ToString( EndTime/60 )+"min";
+                                } else {
+                                    string EndMin = UTIL_ToString(EndTime/60);
+                                    string EndSec = UTIL_ToString(EndTime%60);
+                                    string LeftMin = UTIL_ToString(LeftTime/60);
+                                    string LeftSec = UTIL_ToString(LeftTime%60);
+                                    if(1==EndSec.size())
+                                        EndSec="0"+EndSec;
+                                    if(1==LeftSec.size())
+                                        LeftSec="0"+LeftSec;
+
+                                    Reason += LeftMin+":"+LeftSec + "/" + EndMin+":"+EndSec;
+                                }
+                                m_GHost->m_Callables.push_back( m_GHost->m_DB->ThreadedBanAdd( (*i)->GetSpoofedRealm(), (*i)->GetName( ), (*i)->GetIP(), m_GameName, "AutoBan", Reason ) );
+                            }
+                    }
+            }
+    }
 	if( m_CallableGameAdd && m_CallableGameAdd->GetReady( ) )
 	{
 		if( m_CallableGameAdd->GetResult( ) > 0 )
@@ -319,6 +366,10 @@ void CGame :: EventPlayerDeleted( CGamePlayer *player )
 			if( (*i)->GetName( ) == player->GetName( ) )
 				m_DBBanLast = *i;
 		}
+        if( m_GHost->m_AutoBanAll ) {
+            m_AutoBans.push_back( player->GetName( ) );
+            SendAllChat( m_GHost->m_Language->UserMayBanned( player->GetName( ) ) );
+        }
 	}
 }
 
@@ -1840,4 +1891,15 @@ void CGame :: SaveGameData( )
 {
 	CONSOLE_Print( "[GAME: " + m_GameName + "] saving game data to database" );
 	m_CallableGameAdd = m_GHost->m_DB->ThreadedGameAdd( m_GHost->m_BNETs.size( ) == 1 ? m_GHost->m_BNETs[0]->GetServer( ) : string( ), m_DBGame->GetMap( ), m_GameName, m_OwnerName, m_GameTicks / 1000, m_GameState, m_CreatorName, m_CreatorServer );
+}
+
+bool CGame :: IsAutoBanned( string name )
+{
+        for( vector<string> :: iterator i = m_AutoBans.begin( ); i != m_AutoBans.end( ); i++ )
+        {
+                if( *i == name )
+                        return true;
+        }
+
+        return false;
 }

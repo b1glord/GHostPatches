@@ -1500,7 +1500,7 @@ void CBaseGame :: EventPlayerDisconnectTimedOut( CGamePlayer *player )
 		if( !player->GetGProxyDisconnectNoticeSent( ) )
 		{
 			SendAllChat( player->GetName( ) + " " + m_GHost->m_Language->HasLostConnectionTimedOutGProxy( ) + "." );
-			player->SetGProxyDisconnectNoticeSent( true );
+            player->SetGProxyDisconnectNoticeSent( true );
 		}
 
 		if( GetTime( ) - player->GetLastGProxyWaitNoticeSentTime( ) >= 20 )
@@ -1542,7 +1542,7 @@ void CBaseGame :: EventPlayerDisconnectPlayerError( CGamePlayer *player )
 	player->SetLeftCode( PLAYERLEAVE_DISCONNECT );
 
 	if( !m_GameLoading && !m_GameLoaded )
-		OpenSlot( GetSIDFromPID( player->GetPID( ) ), false );
+        OpenSlot( GetSIDFromPID( player->GetPID( ) ), false );
 }
 
 void CBaseGame :: EventPlayerDisconnectSocketError( CGamePlayer *player )
@@ -1552,7 +1552,7 @@ void CBaseGame :: EventPlayerDisconnectSocketError( CGamePlayer *player )
 		if( !player->GetGProxyDisconnectNoticeSent( ) )
 		{
 			SendAllChat( player->GetName( ) + " " + m_GHost->m_Language->HasLostConnectionSocketErrorGProxy( player->GetSocket( )->GetErrorString( ) ) + "." );
-			player->SetGProxyDisconnectNoticeSent( true );
+            player->SetGProxyDisconnectNoticeSent( true );
 		}
 
 		if( GetTime( ) - player->GetLastGProxyWaitNoticeSentTime( ) >= 20 )
@@ -1574,7 +1574,7 @@ void CBaseGame :: EventPlayerDisconnectSocketError( CGamePlayer *player )
 	player->SetLeftCode( PLAYERLEAVE_DISCONNECT );
 
 	if( !m_GameLoading && !m_GameLoaded )
-		OpenSlot( GetSIDFromPID( player->GetPID( ) ), false );
+        OpenSlot( GetSIDFromPID( player->GetPID( ) ), false );
 }
 
 void CBaseGame :: EventPlayerDisconnectConnectionClosed( CGamePlayer *player )
@@ -1606,7 +1606,7 @@ void CBaseGame :: EventPlayerDisconnectConnectionClosed( CGamePlayer *player )
 	player->SetLeftCode( PLAYERLEAVE_DISCONNECT );
 
 	if( !m_GameLoading && !m_GameLoaded )
-		OpenSlot( GetSIDFromPID( player->GetPID( ) ), false );
+        OpenSlot( GetSIDFromPID( player->GetPID( ) ), false );
 }
 
 void CBaseGame :: EventPlayerJoined( CPotentialPlayer *potential, CIncomingJoinPlayer *joinPlayer )
@@ -2528,6 +2528,12 @@ void CBaseGame :: EventPlayerLeft( CGamePlayer *player, uint32_t reason )
 
 	if( !m_GameLoading && !m_GameLoaded )
 		OpenSlot( GetSIDFromPID( player->GetPID( ) ), false );
+    else {
+        if(! m_GHost->m_AutoBanAll ) {
+            m_AutoBans.push_back( player->GetName( ) );
+            SendAllChat( m_GHost->m_Language->UserMayBanned( player->GetName( ) ) );
+        }
+    }
 }
 
 void CBaseGame :: EventPlayerLoaded( CGamePlayer *player )
