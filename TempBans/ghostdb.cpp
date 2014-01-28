@@ -87,7 +87,7 @@ CDBBan *CGHostDB :: BanCheck( string server, string user, string ip )
 	return NULL;
 }
 
-bool CGHostDB :: BanAdd( string server, string user, string ip, string gamename, string admin, string reason )
+bool CGHostDB :: BanAdd( string server, string user, string ip, string gamename, string admin, string reason, uint32_t bantime )
 {
 	return false;
 }
@@ -105,6 +105,11 @@ bool CGHostDB :: BanRemove( string user )
 vector<CDBBan *> CGHostDB :: BanList( string server )
 {
 	return vector<CDBBan *>( );
+}
+
+bool CGHostDB :: TBanRemove( string server )
+{
+    return false;
 }
 
 uint32_t CGHostDB :: GameAdd( string server, string map, string gamename, string ownername, uint32_t duration, uint32_t gamestate, string creatorname, string creatorserver )
@@ -222,7 +227,7 @@ CCallableBanCheck *CGHostDB :: ThreadedBanCheck( string server, string user, str
 	return NULL;
 }
 
-CCallableBanAdd *CGHostDB :: ThreadedBanAdd( string server, string user, string ip, string gamename, string admin, string reason )
+CCallableBanAdd *CGHostDB :: ThreadedBanAdd( string server, string user, string ip, string gamename, string admin, string reason, uint32_t bantime )
 {
 	return NULL;
 }
@@ -240,6 +245,11 @@ CCallableBanRemove *CGHostDB :: ThreadedBanRemove( string user )
 CCallableBanList *CGHostDB :: ThreadedBanList( string server )
 {
 	return NULL;
+}
+
+CCallableTBanRemove *CGHostDB :: ThreadedTBanRemove( string server )
+{
+    return NULL;
 }
 
 CCallableGameAdd *CGHostDB :: ThreadedGameAdd( string server, string map, string gamename, string ownername, uint32_t duration, uint32_t gamestate, string creatorname, string creatorserver )
@@ -365,6 +375,11 @@ CCallableBanRemove :: ~CCallableBanRemove( )
 CCallableBanList :: ~CCallableBanList( )
 {
 	// don't delete anything in m_Result here, it's the caller's responsibility
+}
+
+CCallableTBanRemove :: ~CCallableTBanRemove( )
+{
+
 }
 
 CCallableGameAdd :: ~CCallableGameAdd( )

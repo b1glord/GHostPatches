@@ -36,6 +36,7 @@ class CCallableBanCheck;
 class CCallableBanAdd;
 class CCallableBanRemove;
 class CCallableBanList;
+class CCallableTBanRemove;
 class CCallableGameAdd;
 class CCallableGamePlayerAdd;
 class CCallableGamePlayerSummaryCheck;
@@ -81,10 +82,11 @@ public:
 	virtual vector<string> AdminList( string server );
 	virtual uint32_t BanCount( string server );
 	virtual CDBBan *BanCheck( string server, string user, string ip );
-	virtual bool BanAdd( string server, string user, string ip, string gamename, string admin, string reason );
+    virtual bool BanAdd( string server, string user, string ip, string gamename, string admin, string reason, uint32_t bantime );
 	virtual bool BanRemove( string server, string user );
 	virtual bool BanRemove( string user );
 	virtual vector<CDBBan *> BanList( string server );
+    virtual bool TBanRemove( string server );
 	virtual uint32_t GameAdd( string server, string map, string gamename, string ownername, uint32_t duration, uint32_t gamestate, string creatorname, string creatorserver );
 	virtual uint32_t GamePlayerAdd( uint32_t gameid, string name, string ip, uint32_t spoofed, string spoofedrealm, uint32_t reserved, uint32_t loadingtime, uint32_t left, string leftreason, uint32_t team, uint32_t colour );
 	virtual uint32_t GamePlayerCount( string name );
@@ -111,10 +113,11 @@ public:
 	virtual CCallableAdminList *ThreadedAdminList( string server );
 	virtual CCallableBanCount *ThreadedBanCount( string server );
 	virtual CCallableBanCheck *ThreadedBanCheck( string server, string user, string ip );
-	virtual CCallableBanAdd *ThreadedBanAdd( string server, string user, string ip, string gamename, string admin, string reason );
+    virtual CCallableBanAdd *ThreadedBanAdd( string server, string user, string ip, string gamename, string admin, string reason, uint32_t bantime );
 	virtual CCallableBanRemove *ThreadedBanRemove( string server, string user );
 	virtual CCallableBanRemove *ThreadedBanRemove( string user );
 	virtual CCallableBanList *ThreadedBanList( string server );
+    virtual CCallableTBanRemove *ThreadedTBanRemove( string server );
 	virtual CCallableGameAdd *ThreadedGameAdd( string server, string map, string gamename, string ownername, uint32_t duration, uint32_t gamestate, string creatorname, string creatorserver );
 	virtual CCallableGamePlayerAdd *ThreadedGamePlayerAdd( uint32_t gameid, string name, string ip, uint32_t spoofed, string spoofedrealm, uint32_t reserved, uint32_t loadingtime, uint32_t left, string leftreason, uint32_t team, uint32_t colour );
 	virtual CCallableGamePlayerSummaryCheck *ThreadedGamePlayerSummaryCheck( string name );
@@ -298,10 +301,11 @@ protected:
 	string m_GameName;
 	string m_Admin;
 	string m_Reason;
+    uint32_t m_BanTime;
 	bool m_Result;
 
 public:
-	CCallableBanAdd( string nServer, string nUser, string nIP, string nGameName, string nAdmin, string nReason ) : CBaseCallable( ), m_Server( nServer ), m_User( nUser ), m_IP( nIP ), m_GameName( nGameName ), m_Admin( nAdmin ), m_Reason( nReason ), m_Result( false ) { }
+    CCallableBanAdd( string nServer, string nUser, string nIP, string nGameName, string nAdmin, string nReason, uint32_t nBanTime ) : CBaseCallable( ), m_Server( nServer ), m_User( nUser ), m_IP( nIP ), m_GameName( nGameName ), m_Admin( nAdmin ), m_Reason( nReason ), m_BanTime( nBanTime ), m_Result( false ) { }
 	virtual ~CCallableBanAdd( );
 
 	virtual string GetServer( )				{ return m_Server; }
@@ -310,6 +314,7 @@ public:
 	virtual string GetGameName( )			{ return m_GameName; }
 	virtual string GetAdmin( )				{ return m_Admin; }
 	virtual string GetReason( )				{ return m_Reason; }
+    virtual uint32_t GetBanTime( )          { return m_BanTime; }
 	virtual bool GetResult( )				{ return m_Result; }
 	virtual void SetResult( bool nResult )	{ m_Result = nResult; }
 };
@@ -343,6 +348,21 @@ public:
 
 	virtual vector<CDBBan *> GetResult( )				{ return m_Result; }
 	virtual void SetResult( vector<CDBBan *> nResult )	{ m_Result = nResult; }
+};
+
+class CCallableTBanRemove : virtual public CBaseCallable
+{
+protected:
+    string m_Server;
+    bool m_Result;
+
+public:
+    CCallableTBanRemove( string nServer ) : CBaseCallable( ), m_Server( nServer ), m_Result( false ) { }
+    virtual ~CCallableTBanRemove( );
+
+    virtual string GetServer( )				{ return m_Server; }
+    virtual bool GetResult( )				{ return m_Result; }
+    virtual void SetResult( bool nResult )	{ m_Result = nResult; }
 };
 
 class CCallableGameAdd : virtual public CBaseCallable

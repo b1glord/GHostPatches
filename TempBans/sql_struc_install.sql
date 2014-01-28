@@ -14,7 +14,8 @@ CREATE TABLE bans (
 	date DATETIME NOT NULL,
 	gamename VARCHAR(31) NOT NULL,
 	admin VARCHAR(15) NOT NULL,
-	reason VARCHAR(255) NOT NULL
+   reason VARCHAR(255) NOT NULL,
+   expiredate DATETIME NOT NULL,
 );
 
 CREATE TABLE games (

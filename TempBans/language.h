@@ -41,6 +41,7 @@ public:
 	string YouDontHaveAccessToThatCommand( );
 	string UserIsAlreadyBanned( string server, string victim );
 	string BannedUser( string server, string victim );
+    string PermBannedUser( string server, string victim );
 	string ErrorBanningUser( string server, string victim );
 	string UserIsAnAdmin( string server, string user );
 	string UserIsNotAnAdmin( string server, string user );
@@ -86,6 +87,7 @@ public:
 	string TryingToJoinTheGameButBanned( string victim );
 	string UnableToBanNoMatchesFound( string victim );
 	string PlayerWasBannedByPlayer( string server, string victim, string user );
+    string PlayerWasPermBannedByPlayer( string server, string victim, string user );
 	string UnableToBanFoundMoreThanOneMatch( string victim );
 	string AddedPlayerToTheHoldList( string user );
 	string UnableToKickNoMatchesFound( string victim );
@@ -254,6 +256,8 @@ public:
 	string WaitForReconnectSecondsRemain( string seconds );
 	string WasUnrecoverablyDroppedFromGProxy( );
     string PlayerReconnectedWithGProxy( string name );
+    string ErrorMissingReason( );
+    string ErrorBanningWrongSuffix( string suffix );
 };
 
 #endif

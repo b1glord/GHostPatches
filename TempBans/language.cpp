@@ -91,6 +91,14 @@ string CLanguage :: BannedUser( string server, string victim )
 	return Out;
 }
 
+string CLanguage :: PermBannedUser( string server, string victim )
+{
+    string Out = m_CFG->GetString( "lang_0007a", "lang_0007a" );
+    UTIL_Replace( Out, "$SERVER$", server );
+    UTIL_Replace( Out, "$VICTIM$", victim );
+    return Out;
+}
+
 string CLanguage :: ErrorBanningUser( string server, string victim )
 {
 	string Out = m_CFG->GetString( "lang_0008", "lang_0008" );
@@ -414,6 +422,15 @@ string CLanguage :: PlayerWasBannedByPlayer( string server, string victim, strin
 	UTIL_Replace( Out, "$VICTIM$", victim );
 	UTIL_Replace( Out, "$USER$", user );
 	return Out;
+}
+
+string CLanguage :: PlayerWasPermBannedByPlayer( string server, string victim, string user )
+{
+    string Out = m_CFG->GetString( "lang_0052a", "lang_0052a" );
+    UTIL_Replace( Out, "$SERVER$", server );
+    UTIL_Replace( Out, "$VICTIM$", victim );
+    UTIL_Replace( Out, "$USER$", user );
+    return Out;
 }
 
 string CLanguage :: UnableToBanFoundMoreThanOneMatch( string victim )
@@ -1532,4 +1549,17 @@ string CLanguage :: PlayerReconnectedWithGProxy( string name )
 	string Out = m_CFG->GetString( "lang_0220", "lang_0220" );
 	UTIL_Replace( Out, "$NAME$", name );
 	return Out;
+}
+
+string CLanguage :: ErrorMissingReason( )
+{
+    string Out = m_CFG->GetString( "lang_0221", "lang_0221" );
+    return Out;
+}
+
+string CLanguage :: ErrorBanningWrongSuffix( string suffix )
+{
+    string Out = m_CFG->GetString( "lang_0222", "lang_0222" );
+    UTIL_Replace( Out, "$SUFFIX$", suffix );
+    return Out;
 }

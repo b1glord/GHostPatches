@@ -55,6 +55,7 @@ CBNET :: CBNET( CGHost *nGHost, string nServer, string nServerAlias, string nBNL
 	m_BNCSUtil = new CBNCSUtilInterface( nUserName, nUserPassword );
 	m_CallableAdminList = m_GHost->m_DB->ThreadedAdminList( nServer );
 	m_CallableBanList = m_GHost->m_DB->ThreadedBanList( nServer );
+    m_CallableTBanRemove = m_GHost->m_DB->ThreadedTBanRemove( nServer );
 	m_Exiting = false;
 	m_Server = nServer;
 	string LowerServer = m_Server;
@@ -126,6 +127,7 @@ CBNET :: CBNET( CGHost *nGHost, string nServer, string nServerAlias, string nBNL
 	m_FrequencyDelayTimes = 0;
 	m_LastAdminRefreshTime = GetTime( );
 	m_LastBanRefreshTime = GetTime( );
+    m_LastTBanRemoveRefreshTime = GetTime( );
 	m_FirstConnect = true;
 	m_WaitingToConnect = true;
 	m_LoggedIn = false;
@@ -184,6 +186,9 @@ CBNET :: ~CBNET( )
 
 	if( m_CallableBanList )
 		m_GHost->m_Callables.push_back( m_CallableBanList );
+
+    if( m_CallableTBanRemove )
+        m_GHost->m_Callables.push_back( m_CallableTBanRemove );
 
 	for( vector<CDBBan *> :: iterator i = m_Bans.begin( ); i != m_Bans.end( ); ++i )
 		delete *i;
@@ -305,7 +310,10 @@ bool CBNET :: Update( void *fd, void *send_fd )
 			if( i->second->GetResult( ) )
 			{
 				AddBan( i->second->GetUser( ), i->second->GetIP( ), i->second->GetGameName( ), i->second->GetAdmin( ), i->second->GetReason( ) );
-				QueueChatCommand( m_GHost->m_Language->BannedUser( i->second->GetServer( ), i->second->GetUser( ) ), i->first, !i->first.empty( ) );
+                if(i->second->GetBanTime() != 0 )
+                    QueueChatCommand( m_GHost->m_Language->BannedUser( i->second->GetServer( ), i->second->GetUser( ) ), i->first, !i->first.empty( ) );
+                else
+                    QueueChatCommand( m_GHost->m_Language->PermBannedUser( i->second->GetServer( ), i->second->GetUser( ) ), i->first, !i->first.empty( ) );
 			}
 			else
 				QueueChatCommand( m_GHost->m_Language->ErrorBanningUser( i->second->GetServer( ), i->second->GetUser( ) ), i->first, !i->first.empty( ) );
@@ -416,9 +424,9 @@ bool CBNET :: Update( void *fd, void *send_fd )
 		m_LastAdminRefreshTime = GetTime( );
 	}
 
-	// refresh the ban list every 60 minutes
+    // refresh the ban list every 5 minutes
 
-	if( !m_CallableBanList && GetTime( ) - m_LastBanRefreshTime >= 3600 )
+    if( !m_CallableBanList && GetTime( ) - m_LastBanRefreshTime >= 300 )
 		m_CallableBanList = m_GHost->m_DB->ThreadedBanList( m_Server );
 
 	if( m_CallableBanList && m_CallableBanList->GetReady( ) )
@@ -434,6 +442,17 @@ bool CBNET :: Update( void *fd, void *send_fd )
 		m_CallableBanList = NULL;
 		m_LastBanRefreshTime = GetTime( );
 	}
+
+    if( !m_CallableTBanRemove && GetTime( ) - m_LastTBanRemoveRefreshTime >= 300 )
+        m_CallableTBanRemove = m_GHost->m_DB->ThreadedTBanRemove( m_Server );
+
+    if( m_CallableTBanRemove && m_CallableTBanRemove->GetReady( ) )
+    {
+        m_GHost->m_DB->RecoverCallable( m_CallableTBanRemove );
+        delete m_CallableTBanRemove;
+        m_CallableTBanRemove = NULL;
+        m_LastBanRefreshTime = GetTime( );
+    }
 
 	// we return at the end of each if statement so we don't have to deal with errors related to the order of the if statements
 	// that means it might take a few ms longer to complete a task involving multiple steps (in this case, reconnecting) due to blocking or sleeping
@@ -1067,8 +1086,105 @@ void CBNET :: ProcessChatEvent( CIncomingChatEvent *chatEvent )
 					if( IsBannedName( Victim ) )
 						QueueChatCommand( m_GHost->m_Language->UserIsAlreadyBanned( m_Server, Victim ), User, Whisper );
 					else
-						m_PairedBanAdds.push_back( PairedBanAdd( Whisper ? User : string( ), m_GHost->m_DB->ThreadedBanAdd( m_Server, Victim, string( ), string( ), User, Reason ) ) );
+                        m_PairedBanAdds.push_back( PairedBanAdd( Whisper ? User : string( ), m_GHost->m_DB->ThreadedBanAdd( m_Server, Victim, string( ), string( ), User, Reason, 0 ) ) );
 				}
+
+               //
+               // !TEMPBAN
+               // !TBAN
+               //
+               else if( ( Command == "tempban" || Command == "tban" ) && !Payload.empty( ) )
+               {
+                       // extract the victim and the reason
+                       // e.g. "Varlock leaver after dying" -> victim: "Varlock", reason: "leaver after dying"
+
+                       string Victim;
+                       string Reason;
+
+                       uint32_t Amount;
+                       uint32_t BanTime;
+                       string Suffix;
+
+                       stringstream SS;
+                       SS << Payload;
+                       SS >> Victim;
+
+                       if( SS.fail( ) || Victim.empty() || Victim.size() < 3 )
+                               CONSOLE_Print( "[TEMPBAN] bad input #1 to the !TEMPBAN command" );
+                       else
+                       {
+                               SS >> Amount;
+
+                               if( SS.fail( ) || Amount == 0 )
+                                       CONSOLE_Print( "[TEMPBAN] bad input #2 to !TEMPBAN command" );
+                               else
+                               {
+                                       SS >> Suffix;
+
+                                       if (SS.fail() || Suffix.empty())
+                                               CONSOLE_Print( "[TEMPBAN] bad input #3 to the autohost command" );
+                                       else
+                                       {
+                                               transform( Suffix.begin( ), Suffix.end( ), Suffix.begin( ), ::tolower );
+
+                                               // handle suffix
+                                               // valid suffix is: hour, h, week, w, day, d, month, m
+
+                                               bool ValidSuffix = false;
+                                               if (Suffix == "hour" || Suffix == "hours" || Suffix == "h")
+                                               {
+                                                       BanTime = Amount * 3600;
+                                                       ValidSuffix = true;
+                                               }
+                                               else if (Suffix == "day" || Suffix == "days" || Suffix == "d")
+                                               {
+                                                       BanTime = Amount * 86400;
+                                                       ValidSuffix = true;
+                                               }
+                                               else if (Suffix == "week" || Suffix == "weeks" || Suffix == "w")
+                                               {
+                                                       BanTime = Amount * 604800;
+                                                       ValidSuffix = true;
+                                               }
+                                               else if (Suffix == "month" || Suffix == "months" || Suffix == "m")
+                                               {
+                                                       BanTime = Amount * 2419200;
+                                                       ValidSuffix = true;
+                                               }
+
+                                               if (ValidSuffix)
+                                               {
+                                                       if (!SS.eof())
+                                                       {
+                                                               getline( SS, Reason );
+                                                               string :: size_type Start = Reason.find_first_not_of( " " );
+
+                                                               if( Start != string :: npos )
+                                                                       Reason = Reason.substr( Start );
+                                                       }
+
+                                                       if( IsBannedName( Victim ) )
+                                                               QueueChatCommand( m_GHost->m_Language->UserIsAlreadyBanned( m_Server, Victim ), User, Whisper );
+                                                       else
+                                                       {
+                                                               if( !Reason.empty() )
+                                                               {
+                                                                       m_PairedBanAdds.push_back( PairedBanAdd( Whisper ? User : string( ), m_GHost->m_DB->ThreadedBanAdd( m_Server, Victim, string( ), string( ), User, Reason, BanTime ) ) );
+                                                                       //QueueChatCommand( "Temporary ban: " + Victim + " for " + UTIL_ToString(Amount) + " " + Suffix + " with reason: " + Reason, User, Whisper);
+                                                               }
+                                                               else
+                                                                       QueueChatCommand( m_GHost->m_Language->ErrorMissingReason(), User, Whisper );
+                                                       }
+
+                                               }
+                                               else
+                                               {
+                                                       QueueChatCommand( m_GHost->m_Language->ErrorBanningWrongSuffix( Suffix ), User, Whisper);
+                                               }
+                                       }
+                               }
+                       }
+               }
 
 				//
 				// !ANNOUNCE

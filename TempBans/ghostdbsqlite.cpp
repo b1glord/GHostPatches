@@ -756,12 +756,15 @@ CDBBan *CGHostDBSQLite :: BanCheck( string server, string user, string ip )
 	return Ban;
 }
 
-bool CGHostDBSQLite :: BanAdd( string server, string user, string ip, string gamename, string admin, string reason )
+bool CGHostDBSQLite :: BanAdd( string server, string user, string ip, string gamename, string admin, string reason, uint32_t bantime )
 {
 	transform( user.begin( ), user.end( ), user.begin( ), (int(*)(int))tolower );
 	bool Success = false;
 	sqlite3_stmt *Statement;
-	m_DB->Prepare( "INSERT INTO bans ( server, name, ip, date, gamename, admin, reason ) VALUES ( ?, ?, ?, date('now'), ?, ?, ? )", (void **)&Statement );
+    string Time = "0000-00-00 00:00:00";
+    if( bantime != 0 )
+        Time = "datetime('now'+"+UTIL_ToString(bantime)+", 'unixepoch')";
+    m_DB->Prepare( "INSERT INTO bans ( server, name, ip, date, gamename, admin, reason, expiredate ) VALUES ( ?, ?, ?, date('now'), ?, ?, ?, "+Time+") )", (void **)&Statement );
 
 	if( Statement )
 	{
@@ -868,6 +871,30 @@ vector<CDBBan *> CGHostDBSQLite :: BanList( string server )
 		CONSOLE_Print( "[SQLITE3] prepare error retrieving ban list [" + server + "] - " + m_DB->GetError( ) );
 
 	return BanList;
+}
+
+bool CGHostDBSQLite :: TBanRemove( string server )
+{
+    bool Success = false;
+    sqlite3_stmt *Statement;
+    m_DB->Prepare( "DELETE FROM bans WHERE server=? AND expiredate <= date('now')", (void **)&Statement );
+
+    if( Statement )
+    {
+        sqlite3_bind_text( Statement, 1, server.c_str( ), -1, SQLITE_TRANSIENT );
+        int RC = m_DB->Step( Statement );
+
+        if( RC == SQLITE_DONE )
+            Success = true;
+        else if( RC == SQLITE_ERROR )
+            CONSOLE_Print( "[SQLITE3] error removing ban [" + server + "] - " + m_DB->GetError( ) );
+
+        m_DB->Finalize( Statement );
+    }
+    else
+        CONSOLE_Print( "[SQLITE3] prepare error removing ban [" + server + "] - " + m_DB->GetError( ) );
+
+    return Success;
 }
 
 uint32_t CGHostDBSQLite :: GameAdd( string server, string map, string gamename, string ownername, uint32_t duration, uint32_t gamestate, string creatorname, string creatorserver )
@@ -1527,10 +1554,10 @@ CCallableBanCheck *CGHostDBSQLite :: ThreadedBanCheck( string server, string use
 	return Callable;
 }
 
-CCallableBanAdd *CGHostDBSQLite :: ThreadedBanAdd( string server, string user, string ip, string gamename, string admin, string reason )
+CCallableBanAdd *CGHostDBSQLite :: ThreadedBanAdd( string server, string user, string ip, string gamename, string admin, string reason, uint32_t bantime )
 {
-	CCallableBanAdd *Callable = new CCallableBanAdd( server, user, ip, gamename, admin, reason );
-	Callable->SetResult( BanAdd( server, user, ip, gamename, admin, reason ) );
+    CCallableBanAdd *Callable = new CCallableBanAdd( server, user, ip, gamename, admin, reason, bantime );
+    Callable->SetResult( BanAdd( server, user, ip, gamename, admin, reason, bantime ) );
 	Callable->SetReady( true );
 	return Callable;
 }
@@ -1549,6 +1576,14 @@ CCallableBanRemove *CGHostDBSQLite :: ThreadedBanRemove( string user )
 	Callable->SetResult( BanRemove( user ) );
 	Callable->SetReady( true );
 	return Callable;
+}
+
+CCallableTBanRemove *CGHostDBSQLite :: ThreadedTBanRemove( string server )
+{
+    CCallableTBanRemove *Callable = new CCallableTBanRemove( server );
+    Callable->SetResult( TBanRemove( server ) );
+    Callable->SetReady( true );
+    return Callable;
 }
 
 CCallableBanList *CGHostDBSQLite :: ThreadedBanList( string server )

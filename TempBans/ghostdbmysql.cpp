@@ -240,14 +240,14 @@ CCallableBanCheck *CGHostDBMySQL :: ThreadedBanCheck( string server, string user
 	return Callable;
 }
 
-CCallableBanAdd *CGHostDBMySQL :: ThreadedBanAdd( string server, string user, string ip, string gamename, string admin, string reason )
+CCallableBanAdd *CGHostDBMySQL :: ThreadedBanAdd( string server, string user, string ip, string gamename, string admin, string reason, uint32_t bantime )
 {
 	void *Connection = GetIdleConnection( );
 
 	if( !Connection )
                 ++m_NumConnections;
 
-	CCallableBanAdd *Callable = new CMySQLCallableBanAdd( server, user, ip, gamename, admin, reason, Connection, m_BotID, m_Server, m_Database, m_User, m_Password, m_Port );
+    CCallableBanAdd *Callable = new CMySQLCallableBanAdd( server, user, ip, gamename, admin, reason, bantime, Connection, m_BotID, m_Server, m_Database, m_User, m_Password, m_Port );
 	CreateThread( Callable );
         ++m_OutstandingCallables;
 	return Callable;
@@ -291,6 +291,20 @@ CCallableBanList *CGHostDBMySQL :: ThreadedBanList( string server )
         ++m_OutstandingCallables;
 	return Callable;
 }
+
+CCallableTBanRemove *CGHostDBMySQL :: ThreadedTBanRemove( string server )
+{
+    void *Connection = GetIdleConnection( );
+
+    if( !Connection )
+                ++m_NumConnections;
+
+    CCallableTBanRemove *Callable = new CMySQLCallableTBanRemove( server, Connection, m_BotID, m_Server, m_Database, m_User, m_Password, m_Port );
+    CreateThread( Callable );
+        ++m_OutstandingCallables;
+    return Callable;
+}
+
 
 CCallableGameAdd *CGHostDBMySQL :: ThreadedGameAdd( string server, string map, string gamename, string ownername, uint32_t duration, uint32_t gamestate, string creatorname, string creatorserver )
 {
@@ -692,7 +706,7 @@ CDBBan *MySQLBanCheck( void *conn, string *error, uint32_t botid, string server,
 	return Ban;
 }
 
-bool MySQLBanAdd( void *conn, string *error, uint32_t botid, string server, string user, string ip, string gamename, string admin, string reason )
+bool MySQLBanAdd( void *conn, string *error, uint32_t botid, string server, string user, string ip, string gamename, string admin, string reason, uint32_t bantime )
 {
 	transform( user.begin( ), user.end( ), user.begin( ), (int(*)(int))tolower );
 	string EscServer = MySQLEscapeString( conn, server );
@@ -702,7 +716,10 @@ bool MySQLBanAdd( void *conn, string *error, uint32_t botid, string server, stri
 	string EscAdmin = MySQLEscapeString( conn, admin );
 	string EscReason = MySQLEscapeString( conn, reason );
 	bool Success = false;
-	string Query = "INSERT INTO bans ( botid, server, name, ip, date, gamename, admin, reason ) VALUES ( " + UTIL_ToString( botid ) + ", '" + EscServer + "', '" + EscUser + "', '" + EscIP + "', CURDATE( ), '" + EscGameName + "', '" + EscAdmin + "', '" + EscReason + "' )";
+    string Time = "0000-00-00 00:00:00";
+    if( bantime != 0 )
+        Time = "FROM_UNIXTIME( UNIX_TIMESTAMP( ) + " + UTIL_ToString(bantime) + ")";
+    string Query = "INSERT INTO bans ( botid, server, name, ip, date, gamename, admin, reason, expiredate ) VALUES ( " + UTIL_ToString( botid ) + ", '" + EscServer + "', '" + EscUser + "', '" + EscIP + "', CURDATE( ), '" + EscGameName + "', '" + EscAdmin + "', '" + EscReason + "', "+Time+" )";
 
 	if( mysql_real_query( (MYSQL *)conn, Query.c_str( ), Query.size( ) ) != 0 )
 		*error = mysql_error( (MYSQL *)conn );
@@ -772,6 +789,20 @@ vector<CDBBan *> MySQLBanList( void *conn, string *error, uint32_t botid, string
 	}
 
 	return BanList;
+}
+
+bool MySQLTBanRemove( void *conn, string *error, uint32_t botid, string server )
+{
+    string EscServer = MySQLEscapeString( conn, server );
+    bool Success = false;
+    string Query = "DELETE FROM bans WHERE server='" + EscServer + "' AND `expiredate` <= NOW()'";
+
+    if( mysql_real_query( (MYSQL *)conn, Query.c_str( ), Query.size( ) ) != 0 )
+        *error = mysql_error( (MYSQL *)conn );
+    else
+        Success = true;
+
+    return Success;
 }
 
 uint32_t MySQLGameAdd( void *conn, string *error, uint32_t botid, string server, string map, string gamename, string ownername, uint32_t duration, uint32_t gamestate, string creatorname, string creatorserver )
@@ -1251,7 +1282,7 @@ void CMySQLCallableBanAdd :: operator( )( )
 	Init( );
 
 	if( m_Error.empty( ) )
-		m_Result = MySQLBanAdd( m_Connection, &m_Error, m_SQLBotID, m_Server, m_User, m_IP, m_GameName, m_Admin, m_Reason );
+        m_Result = MySQLBanAdd( m_Connection, &m_Error, m_SQLBotID, m_Server, m_User, m_IP, m_GameName, m_Admin, m_Reason, m_BanTime );
 
 	Close( );
 }
@@ -1279,6 +1310,16 @@ void CMySQLCallableBanList :: operator( )( )
 		m_Result = MySQLBanList( m_Connection, &m_Error, m_SQLBotID, m_Server );
 
 	Close( );
+}
+
+void CMySQLCallableTBanRemove :: operator( )( )
+{
+    Init( );
+
+    if( m_Error.empty( ) )
+        m_Result = MySQLTBanRemove( m_Connection, &m_Error, m_SQLBotID, m_Server );
+
+    Close( );
 }
 
 void CMySQLCallableGameAdd :: operator( )( )
