@@ -10,6 +10,7 @@ GameList patch by [uakf.b](https://github.com/uakfdotb)
    ownername VARCHAR(32), creatorname VARCHAR(32), map VARCHAR(100), slotstaken INT, slotstotal INT,
    usernames VARCHAR(512), totalgames INT, totalplayers INT) ENGINE = MEMORY;
    ````
+
 - Then, you need to create entry with botid for each bot. If your bot's id is 1:
    ````SQL
    INSERT INTO gamelist (botid) VALUES ('1');
