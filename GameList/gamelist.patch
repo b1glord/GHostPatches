@@ -1,0 +1,516 @@
+From 75159aff8f30f258ebb1e73e8c0a8f2a43cb79db Mon Sep 17 00:00:00 2001
+From: Grief-Code <hasgrief@gmail.com>
+Date: Wed, 29 Jan 2014 20:28:38 +0100
+Subject: [PATCH] Added gamelist
+
+---
+ bnet.cpp         | 29 ++++++++++++++++-
+ bnet.h           |  3 ++
+ game_base.cpp    | 26 +++++++++++++++
+ game_base.h      |  2 ++
+ ghost.cpp        | 53 ++++++++++++++++++++++++++++++
+ ghost.h          |  3 ++
+ ghostdb.cpp      | 15 +++++++++
+ ghostdb.h        | 25 ++++++++++++++
+ ghostdbmysql.cpp | 83 +++++++++++++++++++++++++++++++++++++++++++++++
+ ghostdbmysql.h   | 13 ++++++++
+ 10 files changed, 251 insertions(+), 1 deletion(-)
+
+diff --git a/bnet.cpp b/bnet.cpp
+index ad23a2b..280594a 100644
+--- a/bnet.cpp
++++ b/bnet.cpp
+@@ -179,6 +179,9 @@
+   for( vector<PairedDPSCheck> :: iterator i = m_PairedDPSChecks.begin( ); i != m_PairedDPSChecks.end( ); ++i )
+      m_GHost->m_Callables.push_back( i->second );
+
++	for( vector<PairedGameUpdate> :: iterator i = m_PairedGameUpdates.begin( ); i != m_PairedGameUpdates.end( ); ++i )
++		m_GHost->m_Callables.push_back( i->second );
++
+   if( m_CallableAdminList )
+      m_GHost->m_Callables.push_back( m_CallableAdminList );
+
+@@ -400,6 +403,21 @@ bool CBNET :: Update( void *fd, void *send_fd )
+      else
+         ++i;
+   }
++	for( vector<PairedGameUpdate> :: iterator i = m_PairedGameUpdates.begin( ); i != m_PairedGameUpdates.end( ); )
++	{
++		if( i->second->GetReady( ) )
++		{
++			string response = i->second->GetResult( );
++
++            		QueueChatCommand( response, i->first, !i->first.empty( ) );
++
++			m_GHost->m_DB->RecoverCallable( i->second );
++			delete i->second;
++			i = m_PairedGameUpdates.erase( i );
++		}
++		else
++                        ++i;
++	}
+
+   // refresh the admin list every 5 minutes
+
+@@ -2151,10 +2169,19 @@ void CBNET :: ProcessChatEvent( CIncomingChatEvent *chatEvent )
+         if( IsAdmin( User ) || IsRootAdmin( User ) || ( m_PublicCommands && m_OutPackets.size( ) <= 3 ) )
+         {
+            //
++				// !GAMES
++ 				//
++
++				if( Command == "games" || Command == "g" )
++				{
++					m_PairedGameUpdates.push_back( PairedGameUpdate( Whisper ? User : string( ), m_GHost->m_DB->ThreadedGameUpdate("", "", "", "", 0, "", 0, 0, 0, false ) ) );
++				}
++
++				//
+            // !STATS
+            //
+
+-				if( Command == "stats" )
++				else if( Command == "stats" )
+            {
+               string StatsUser = User;
+
+diff --git a/bnet.h b/bnet.h
+index 1d323fc..94c6007 100644
+--- a/bnet.h
++++ b/bnet.h
+@@ -44,6 +44,7 @@
+ class CCallableGamePlayerSummaryCheck;
+ class CCallableDotAPlayerSummaryCheck;
+ class CDBBan;
++class CCallableGameUpdate;
+
+ typedef pair<string,CCallableAdminCount *> PairedAdminCount;
+ typedef pair<string,CCallableAdminAdd *> PairedAdminAdd;
+@@ -53,6 +54,7 @@
+ typedef pair<string,CCallableBanRemove *> PairedBanRemove;
+ typedef pair<string,CCallableGamePlayerSummaryCheck *> PairedGPSCheck;
+ typedef pair<string,CCallableDotAPlayerSummaryCheck *> PairedDPSCheck;
++typedef pair<string,CCallableGameUpdate *> PairedGameUpdate;
+
+ class CBNET
+ {
+@@ -76,6 +78,7 @@ class CBNET
+   vector<PairedBanRemove> m_PairedBanRemoves;		// vector of paired threaded database ban removes in progress
+   vector<PairedGPSCheck> m_PairedGPSChecks;		// vector of paired threaded database game player summary checks in progress
+   vector<PairedDPSCheck> m_PairedDPSChecks;		// vector of paired threaded database DotA player summary checks in progress
++	vector<PairedGameUpdate> m_PairedGameUpdates;	// vector of paired threaded database gamelist query checks in progress
+   CCallableAdminList *m_CallableAdminList;		// threaded database admin list in progress
+   CCallableBanList *m_CallableBanList;			// threaded database ban list in progress
+   vector<string> m_Admins;						// vector of cached admins
+diff --git a/game_base.cpp b/game_base.cpp
+index 7036c76..6305bce 100644
+--- a/game_base.cpp
++++ b/game_base.cpp
+@@ -208,6 +208,11 @@ uint32_t CBaseGame :: GetNextTimedActionTicks( )
+      return m_Latency - m_LastActionLateBy - TicksSinceLastUpdate;
+ }
+
++string CBaseGame :: GetMapName( )
++{
++	return m_Map->GetMapPath();
++}
++
+ uint32_t CBaseGame :: GetSlotsOccupied( )
+ {
+   uint32_t NumSlotsOccupied = 0;
+@@ -3522,6 +3527,27 @@ CGamePlayer *CBaseGame :: GetPlayerFromColour( unsigned char colour )
+   return NULL;
+ }
+
++string CBaseGame :: GetPlayerList( )
++{
++	string players = "";
++
++	for( unsigned char i = 0; i < m_Slots.size( ); ++i )
++	{
++		if( m_Slots[i].GetSlotStatus( ) == SLOTSTATUS_OCCUPIED && m_Slots[i].GetComputer( ) == 0 )
++		{
++			CGamePlayer *player = GetPlayerFromSID( i );
++
++			if( player )
++				players += player->GetName( ) + "\t" + player->GetSpoofedRealm( ) + "\t" + UTIL_ToString( player->GetPing( m_GHost->m_LCPings ) ) + "\t";
++		}
++
++		else if( m_Slots[i].GetSlotStatus( ) == SLOTSTATUS_OPEN )
++			players += "\t\t\t";
++	}
++
++	return players;
++}
++
+ unsigned char CBaseGame :: GetNewPID( )
+ {
+   // find an unused PID for a new player to use
+diff --git a/game_base.h b/game_base.h
+index 0deab91..0603ab7 100644
+--- a/game_base.h
++++ b/game_base.h
+@@ -137,6 +137,7 @@ class CBaseGame
+   virtual unsigned char GetGameState( )			{ return m_GameState; }
+   virtual unsigned char GetGProxyEmptyActions( )	{ return m_GProxyEmptyActions; }
+   virtual string GetGameName( )					{ return m_GameName; }
++	virtual string GetMapName( );
+   virtual string GetLastGameName( )				{ return m_LastGameName; }
+   virtual string GetVirtualHostName( )			{ return m_VirtualHostName; }
+   virtual string GetOwnerName( )					{ return m_OwnerName; }
+@@ -237,6 +238,7 @@ class CBaseGame
+   virtual CGamePlayer *GetPlayerFromName( string name, bool sensitive );
+   virtual uint32_t GetPlayerFromNamePartial( string name, CGamePlayer **player );
+   virtual CGamePlayer *GetPlayerFromColour( unsigned char colour );
++	virtual string GetPlayerList( );
+   virtual unsigned char GetNewPID( );
+   virtual unsigned char GetNewColour( );
+   virtual BYTEARRAY GetPIDs( );
+diff --git a/ghost.cpp b/ghost.cpp
+index a4bceec..3b080b4 100644
+--- a/ghost.cpp
++++ b/ghost.cpp
+@@ -402,6 +402,7 @@ int main( int argc, char **argv )
+   m_CRC->Initialize( );
+   m_SHA = new CSHA1( );
+   m_CurrentGame = NULL;
++	m_CallableGameUpdate = NULL;
+   string DBType = CFG->GetString( "db_type", "sqlite3" );
+   CONSOLE_Print( "[GHOST] opening primary database" );
+
+@@ -493,6 +494,8 @@ int main( int argc, char **argv )
+   m_AutoHostGameName = CFG->GetString( "autohost_gamename", string( ) );
+   m_AutoHostOwner = CFG->GetString( "autohost_owner", string( ) );
+   m_LastAutoHostTime = GetTime( );
++	m_LastGameUpdateTime  = GetTime( );
++	m_LastGameUpdateTime  = GetTime( );
+   m_AutoHostMatchMaking = false;
+   m_AutoHostMinimumScore = 0.0;
+   m_AutoHostMaximumScore = 0.0;
+@@ -1173,6 +1176,36 @@ bool CGHost :: Update( long usecBlock )
+      m_LastAutoHostTime = GetTime( );
+   }
+
++	//update gamelist every 10 seconds
++    	if( !m_CallableGameUpdate && GetTime() - m_LastGameUpdateTime >= 10)
++	{
++    		uint32_t TotalGames = m_Games.size( );
++   		uint32_t TotalPlayers = 0;
++
++    		for( vector<CBaseGame *> :: iterator i = m_Games.begin( ); i != m_Games.end( ); ++i )
++    			TotalPlayers += (*i)->GetNumHumanPlayers( );
++
++	        if(m_CurrentGame)
++		{
++	        	TotalGames++;
++        		TotalPlayers += m_CurrentGame->GetNumHumanPlayers( );
++
++            		m_CallableGameUpdate = m_DB->ThreadedGameUpdate(m_CurrentGame->GetMapName(), m_CurrentGame->GetGameName(), m_CurrentGame->GetOwnerName(), m_CurrentGame->GetCreatorName(), m_CurrentGame->GetSlotsOccupied(), m_CurrentGame->GetPlayerList( ), m_CurrentGame->GetSlotsOccupied() + m_CurrentGame->GetSlotsOpen(), TotalGames, TotalPlayers, true);
++        	} else {
++            		m_CallableGameUpdate = m_DB->ThreadedGameUpdate("", "", "", "", 0, "", 0, TotalGames, TotalPlayers, true);
++        	}
++
++ 		m_LastGameUpdateTime = GetTime();
++    	}
++
++    	if( m_CallableGameUpdate && m_CallableGameUpdate->GetReady())
++	{
++        	m_LastGameUpdateTime = GetTime();
++        	m_DB->RecoverCallable( m_CallableGameUpdate );
++        	delete m_CallableGameUpdate;
++        	m_CallableGameUpdate = NULL;
++    	}
++
+   return m_Exiting || AdminExit || BNETExit;
+ }
+
+@@ -1721,4 +1754,24 @@ void CGHost :: CreateGame( CMap *map, unsigned char gameState, bool saveGame, st
+      if( (*i)->GetHoldClan( ) )
+         (*i)->HoldClan( m_CurrentGame );
+   }
++
++	//update mysql current games list
++	if( m_CallableGameUpdate && m_CallableGameUpdate->GetReady())
++	{
++		m_DB->RecoverCallable( m_CallableGameUpdate );
++        	delete m_CallableGameUpdate;
++        	m_CallableGameUpdate = NULL;
++        	m_LastGameUpdateTime = GetTime();
++	}
++
++    	if(!m_CallableGameUpdate)
++	{
++		uint32_t TotalGames = m_Games.size( ) + 1;
++		uint32_t TotalPlayers = 0;
++		for( vector<CBaseGame *> :: iterator i = m_Games.begin( ); i != m_Games.end( ); ++i )
++			TotalPlayers += (*i)->GetNumHumanPlayers( );
++
++        	m_CallableGameUpdate = m_DB->ThreadedGameUpdate(m_CurrentGame->GetMapName( ), m_CurrentGame->GetGameName(), m_CurrentGame->GetOwnerName(), m_CurrentGame->GetCreatorName(), m_CurrentGame->GetSlotsOccupied(), m_CurrentGame->GetPlayerList( ), m_CurrentGame->GetSlotsOccupied() + m_CurrentGame->GetSlotsOpen(), TotalGames, TotalPlayers, true);
++        	m_LastGameUpdateTime = GetTime();
++    	}
+ }
+diff --git a/ghost.h b/ghost.h
+index 8a3d3c1..0021daa 100644
+--- a/ghost.h
++++ b/ghost.h
+@@ -42,6 +42,7 @@
+ class CMap;
+ class CSaveGame;
+ class CConfig;
++class CCallableGameUpdate;
+
+ class CGHost
+ {
+@@ -77,6 +78,8 @@ class CGHost
+   uint32_t m_AutoHostMaximumGames;		// maximum number of games to auto host
+   uint32_t m_AutoHostAutoStartPlayers;	// when using auto hosting auto start the game when this many players have joined
+   uint32_t m_LastAutoHostTime;			// GetTime when the last auto host was attempted
++	uint32_t m_LastGameUpdateTime; // GetTime when the gamelist was last updated
++	CCallableGameUpdate *m_CallableGameUpdate;// threaded database game update in progress
+   bool m_AutoHostMatchMaking;
+   double m_AutoHostMinimumScore;
+   double m_AutoHostMaximumScore;
+diff --git a/ghostdb.cpp b/ghostdb.cpp
+index e0ac2c7..d5f3419 100644
+--- a/ghostdb.cpp
++++ b/ghostdb.cpp
+@@ -117,6 +117,11 @@ uint32_t CGHostDB :: GamePlayerAdd( uint32_t gameid, string name, string ip, uin
+   return 0;
+ }
+
++string CGHostDB :: GameUpdate( string map, string gamename, string ownername, string creatorname, uint32_t players, string usernames, uint32_t slotsTotal, uint32_t totalGames, uint32_t totalPlayers, bool add )
++{
++	return "";
++}
++
+ uint32_t CGHostDB :: GamePlayerCount( string name )
+ {
+   return 0;
+@@ -247,6 +252,11 @@ CCallableGameAdd *CGHostDB :: ThreadedGameAdd( string server, string map, string
+   return NULL;
+ }
+
++CCallableGameUpdate *CGHostDB :: ThreadedGameUpdate( string map, string gamename, string ownername, string creatorname, uint32_t players, string usernames, uint32_t slotsTotal, uint32_t totalGames, uint32_t totalPlayers, bool add )
++{
++	return NULL;
++}
++
+ CCallableGamePlayerAdd *CGHostDB :: ThreadedGamePlayerAdd( uint32_t gameid, string name, string ip, uint32_t spoofed, string spoofedrealm, uint32_t reserved, uint32_t loadingtime, uint32_t left, string leftreason, uint32_t team, uint32_t colour )
+ {
+   return NULL;
+@@ -377,6 +387,11 @@ void CBaseCallable :: Close( )
+
+ }
+
++CCallableGameUpdate :: ~CCallableGameUpdate( )
++{
++
++}
++
+ CCallableGamePlayerSummaryCheck :: ~CCallableGamePlayerSummaryCheck( )
+ {
+   delete m_Result;
+diff --git a/ghostdb.h b/ghostdb.h
+index b9fec7c..6ebab2b 100644
+--- a/ghostdb.h
++++ b/ghostdb.h
+@@ -51,6 +51,7 @@
+ class CDBGamePlayer;
+ class CDBGamePlayerSummary;
+ class CDBDotAPlayerSummary;
++class CCallableGameUpdate;
+
+ typedef pair<uint32_t,string> VarP;
+
+@@ -88,6 +89,7 @@ class CGHostDB
+   virtual uint32_t GameAdd( string server, string map, string gamename, string ownername, uint32_t duration, uint32_t gamestate, string creatorname, string creatorserver );
+   virtual uint32_t GamePlayerAdd( uint32_t gameid, string name, string ip, uint32_t spoofed, string spoofedrealm, uint32_t reserved, uint32_t loadingtime, uint32_t left, string leftreason, uint32_t team, uint32_t colour );
+   virtual uint32_t GamePlayerCount( string name );
++	virtual string GameUpdate( string map, string gamename, string ownername, string creatorname, uint32_t players, string usernames, uint32_t slotsTotal, uint32_t totalGames, uint32_t totalPlayers, bool add );
+   virtual CDBGamePlayerSummary *GamePlayerSummaryCheck( string name );
+   virtual uint32_t DotAGameAdd( uint32_t gameid, uint32_t winner, uint32_t min, uint32_t sec );
+   virtual uint32_t DotAPlayerAdd( uint32_t gameid, uint32_t colour, uint32_t kills, uint32_t deaths, uint32_t creepkills, uint32_t creepdenies, uint32_t assists, uint32_t gold, uint32_t neutralkills, string item1, string item2, string item3, string item4, string item5, string item6, string hero, uint32_t newcolour, uint32_t towerkills, uint32_t raxkills, uint32_t courierkills );
+@@ -117,6 +119,7 @@ class CGHostDB
+   virtual CCallableBanList *ThreadedBanList( string server );
+   virtual CCallableGameAdd *ThreadedGameAdd( string server, string map, string gamename, string ownername, uint32_t duration, uint32_t gamestate, string creatorname, string creatorserver );
+   virtual CCallableGamePlayerAdd *ThreadedGamePlayerAdd( uint32_t gameid, string name, string ip, uint32_t spoofed, string spoofedrealm, uint32_t reserved, uint32_t loadingtime, uint32_t left, string leftreason, uint32_t team, uint32_t colour );
++	virtual CCallableGameUpdate *ThreadedGameUpdate( string map, string gamename, string ownername, string creatorname, uint32_t players, string usernames, uint32_t slotsTotal, uint32_t totalGames, uint32_t totalPlayers, bool add );
+   virtual CCallableGamePlayerSummaryCheck *ThreadedGamePlayerSummaryCheck( string name );
+   virtual CCallableDotAGameAdd *ThreadedDotAGameAdd( uint32_t gameid, uint32_t winner, uint32_t min, uint32_t sec );
+   virtual CCallableDotAPlayerAdd *ThreadedDotAPlayerAdd( uint32_t gameid, uint32_t colour, uint32_t kills, uint32_t deaths, uint32_t creepkills, uint32_t creepdenies, uint32_t assists, uint32_t gold, uint32_t neutralkills, string item1, string item2, string item3, string item4, string item5, string item6, string hero, uint32_t newcolour, uint32_t towerkills, uint32_t raxkills, uint32_t courierkills );
+@@ -390,6 +393,28 @@ class CCallableGamePlayerAdd : virtual public CBaseCallable
+   virtual void SetResult( uint32_t nResult )	{ m_Result = nResult; }
+ };
+
++class CCallableGameUpdate : virtual public CBaseCallable
++{
++protected:
++    string m_Map;
++    string m_GameName;
++    string m_OwnerName;
++    string m_CreatorName;
++    bool m_Add;
++    uint32_t m_Players;
++    string m_Usernames;
++    uint32_t m_SlotsTotal;
++    uint32_t m_TotalGames;
++    uint32_t m_TotalPlayers;
++    string m_Result;
++public:
++	CCallableGameUpdate( string map, string gamename, string ownername, string creatorname, uint32_t players, string usernames, uint32_t slotsTotal, uint32_t totalGames, uint32_t totalPlayers, bool add ) : CBaseCallable( ), m_Map(map), m_GameName(gamename), m_OwnerName(ownername), m_CreatorName(creatorname), m_Add(add), m_Players(players), m_Usernames(usernames), m_SlotsTotal(slotsTotal), m_TotalGames(totalGames), m_TotalPlayers(totalPlayers) { }
++	virtual ~CCallableGameUpdate( );
++
++	virtual string GetResult( )				{ return m_Result; }
++	virtual void SetResult( string nResult )	{ m_Result = nResult; }
++};
++
+ class CCallableGamePlayerSummaryCheck : virtual public CBaseCallable
+ {
+ protected:
+diff --git a/ghostdbmysql.cpp b/ghostdbmysql.cpp
+index 1a64df2..38646df 100644
+--- a/ghostdbmysql.cpp
++++ b/ghostdbmysql.cpp
+@@ -318,6 +318,19 @@ CCallableGamePlayerAdd *CGHostDBMySQL :: ThreadedGamePlayerAdd( uint32_t gameid,
+   return Callable;
+ }
+
++CCallableGameUpdate *CGHostDBMySQL :: ThreadedGameUpdate( string map, string gamename, string ownername, string creatorname, uint32_t players, string usernames, uint32_t slotsTotal, uint32_t totalGames, uint32_t totalPlayers, bool add )
++{
++	void *Connection = GetIdleConnection( );
++
++	if( !Connection )
++                ++m_NumConnections;
++
++	CCallableGameUpdate *Callable = new CMySQLCallableGameUpdate( map, gamename, ownername, creatorname, players, usernames, slotsTotal, totalGames, totalPlayers, add, Connection, m_BotID, m_Server, m_Database, m_User, m_Password, m_Port );
++	CreateThread( Callable );
++        ++m_OutstandingCallables;
++	return Callable;
++}
++
+ CCallableGamePlayerSummaryCheck *CGHostDBMySQL :: ThreadedGamePlayerSummaryCheck( string name )
+ {
+   void *Connection = GetIdleConnection( );
+@@ -811,6 +824,66 @@ uint32_t MySQLGamePlayerAdd( void *conn, string *error, uint32_t botid, uint32_t
+   return RowID;
+ }
+
++string MySQLGameUpdate( void *conn, string *error, uint32_t botid, string map, string gamename, string ownername, string creatorname, uint32_t players, string usernames, uint32_t slotsTotal, uint32_t totalGames, uint32_t totalPlayers, bool add )
++{
++	if(add)
++	{
++        	string EscMap = MySQLEscapeString(conn, map);
++        	string EscGameName = MySQLEscapeString( conn, gamename );
++        	string EscOwnerName = MySQLEscapeString( conn, ownername );
++        	string EscCreatorName = MySQLEscapeString( conn, creatorname );
++        	string EscUsernames = MySQLEscapeString( conn, usernames );
++        	string Query = "UPDATE gamelist SET map = '" + EscMap + "', gamename = '" + EscGameName + "', ownername = '" + EscOwnerName + "', creatorname = '" + EscCreatorName + "', slotstaken = '" + UTIL_ToString(players) + "', slotstotal = '" + UTIL_ToString(slotsTotal) + "', usernames = '" + EscUsernames + "', totalgames = '" + UTIL_ToString(totalGames) + "', totalplayers = '" + UTIL_ToString(totalPlayers) + "' WHERE botid='" + UTIL_ToString(botid) + "'";
++
++	        if( mysql_real_query( (MYSQL *)conn, Query.c_str( ), Query.size( ) ) != 0 )
++        	    *error = mysql_error( (MYSQL *)conn );
++
++        	return "";
++    	} else {
++        	string Query = "SELECT gamename,slotstaken,slotstotal FROM gamelist";
++
++	        if( mysql_real_query( (MYSQL *)conn, Query.c_str( ), Query.size( ) ) != 0 )
++        	    *error = mysql_error( (MYSQL *)conn );
++        	else
++        	{
++                	MYSQL_RES *Result = mysql_store_result( (MYSQL *)conn );
++                	string response = "Current games: ";
++	                int num = 0;
++
++	                if( Result )
++        	        {
++                 	       vector<string> Row = MySQLFetchRow( Result );
++
++                        	while( !Row.empty( ) )
++                            	{
++                                	if(Row[0] != "")
++					{
++                                    		response += Row[0] + " (" + Row[1] + "/" + Row[2] + "), ";
++                                    		num++;
++                                	}
++
++	                                Row = MySQLFetchRow( Result );
++        	                }
++
++                	        mysql_free_result( Result );
++                	}
++                	else
++	                    	*error = mysql_error( (MYSQL *)conn );
++
++                	if(num == 0)
++			{
++                    		response += "none";
++                	} else {
++                    		response = response.substr(0, response.length() - 2);
++                	}
++
++	                return response;
++            	}
++
++        	return "";
++    	}
++}
++
+ CDBGamePlayerSummary *MySQLGamePlayerSummaryCheck( void *conn, string *error, uint32_t botid, string name )
+ {
+   transform( name.begin( ), name.end( ), name.begin( ), (int(*)(int))tolower );
+@@ -1301,6 +1374,16 @@ void CMySQLCallableGamePlayerAdd :: operator( )( )
+   Close( );
+ }
+
++void CMySQLCallableGameUpdate :: operator( )( )
++{
++	Init( );
++
++	if( m_Error.empty( ) )
++		m_Result = MySQLGameUpdate( m_Connection, &m_Error, m_SQLBotID, m_Map, m_GameName, m_OwnerName, m_CreatorName, m_Players, m_Usernames, m_SlotsTotal, m_TotalGames, m_TotalPlayers, m_Add );
++
++	Close( );
++}
++
+ void CMySQLCallableGamePlayerSummaryCheck :: operator( )( )
+ {
+   Init( );
+diff --git a/ghostdbmysql.h b/ghostdbmysql.h
+index 0a5d8a3..7b86698 100644
+--- a/ghostdbmysql.h
++++ b/ghostdbmysql.h
+@@ -201,6 +201,7 @@ class CGHostDBMySQL : public CGHostDB
+   virtual CCallableBanList *ThreadedBanList( string server );
+   virtual CCallableGameAdd *ThreadedGameAdd( string server, string map, string gamename, string ownername, uint32_t duration, uint32_t gamestate, string creatorname, string creatorserver );
+   virtual CCallableGamePlayerAdd *ThreadedGamePlayerAdd( uint32_t gameid, string name, string ip, uint32_t spoofed, string spoofedrealm, uint32_t reserved, uint32_t loadingtime, uint32_t left, string leftreason, uint32_t team, uint32_t colour );
++	virtual CCallableGameUpdate *ThreadedGameUpdate( string map, string gamename, string ownername, string creatorname, uint32_t players, string usernames, uint32_t slotsTotal, uint32_t totalGames, uint32_t totalPlayers, bool add );
+   virtual CCallableGamePlayerSummaryCheck *ThreadedGamePlayerSummaryCheck( string name );
+   virtual CCallableDotAGameAdd *ThreadedDotAGameAdd( uint32_t gameid, uint32_t winner, uint32_t min, uint32_t sec );
+   virtual CCallableDotAPlayerAdd *ThreadedDotAPlayerAdd( uint32_t gameid, uint32_t colour, uint32_t kills, uint32_t deaths, uint32_t creepkills, uint32_t creepdenies, uint32_t assists, uint32_t gold, uint32_t neutralkills, string item1, string item2, string item3, string item4, string item5, string item6, string hero, uint32_t newcolour, uint32_t towerkills, uint32_t raxkills, uint32_t courierkills );
+@@ -234,6 +235,7 @@ class CGHostDBMySQL : public CGHostDB
+ vector<CDBBan *> MySQLBanList( void *conn, string *error, uint32_t botid, string server );
+ uint32_t MySQLGameAdd( void *conn, string *error, uint32_t botid, string server, string map, string gamename, string ownername, uint32_t duration, uint32_t gamestate, string creatorname, string creatorserver );
+ uint32_t MySQLGamePlayerAdd( void *conn, string *error, uint32_t botid, uint32_t gameid, string name, string ip, uint32_t spoofed, string spoofedrealm, uint32_t reserved, uint32_t loadingtime, uint32_t left, string leftreason, uint32_t team, uint32_t colour );
++string MySQLGameUpdate( void *conn, string *error, uint32_t botid, string map, string gamename, string ownername, string creatorname, uint32_t players, string usernames, uint32_t slotsTotal, uint32_t totalGames, uint32_t totalPlayers, bool add );
+ CDBGamePlayerSummary *MySQLGamePlayerSummaryCheck( void *conn, string *error, uint32_t botid, string name );
+ uint32_t MySQLDotAGameAdd( void *conn, string *error, uint32_t botid, uint32_t gameid, uint32_t winner, uint32_t min, uint32_t sec );
+ uint32_t MySQLDotAPlayerAdd( void *conn, string *error, uint32_t botid, uint32_t gameid, uint32_t colour, uint32_t kills, uint32_t deaths, uint32_t creepkills, uint32_t creepdenies, uint32_t assists, uint32_t gold, uint32_t neutralkills, string item1, string item2, string item3, string item4, string item5, string item6, string hero, uint32_t newcolour, uint32_t towerkills, uint32_t raxkills, uint32_t courierkills );
+@@ -402,6 +404,17 @@ class CMySQLCallableGamePlayerAdd : public CCallableGamePlayerAdd, public CMySQL
+   virtual void Close( ) { CMySQLCallable :: Close( ); }
+ };
+
++class CMySQLCallableGameUpdate : public CCallableGameUpdate, public CMySQLCallable
++{
++public:
++ 	CMySQLCallableGameUpdate( string map, string gamename, string ownername, string creatorname, uint32_t players, string usernames, uint32_t slotsTotal, uint32_t totalGames, uint32_t totalPlayers, bool add, void *nConnection, uint32_t nSQLBotID, string nSQLServer, string nSQLDatabase, string nSQLUser, string nSQLPassword, uint16_t nSQLPort ) : CBaseCallable( ), CCallableGameUpdate( map, gamename, ownername, creatorname, players, usernames, slotsTotal, totalGames, totalPlayers, add ), CMySQLCallable( nConnection, nSQLBotID, nSQLServer, nSQLDatabase, nSQLUser, nSQLPassword, nSQLPort ) { }
++	virtual ~CMySQLCallableGameUpdate( ) { }
++
++	virtual void operator( )( );
++	virtual void Init( ) { CMySQLCallable :: Init( ); }
++	virtual void Close( ) { CMySQLCallable :: Close( ); }
++};
++
+ class CMySQLCallableGamePlayerSummaryCheck : public CCallableGamePlayerSummaryCheck, public CMySQLCallable
+ {
+ public:
+--
+1.8.5.1
