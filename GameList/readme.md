@@ -1,7 +1,12 @@
 GameList patch by [uakf.b](https://github.com/uakfdotb)
 =========================
 
+Ready patched bot:
+------------------
+https://github.com/Grief-Code/GHostPatchedBot/commit/3f2abc6e967dd2615c4679e02b21f5718bc71369
+
 [uakf.b](https://github.com/uakfdotb):
+--------
    This patch will put the current lobby game on your GHost++ into a mysql database, so that if you have multiple hosts running you can get one gamelist and you can also display games on a website. It'll also add a !games command to get the list of games.
 
 - You need to add a table:
