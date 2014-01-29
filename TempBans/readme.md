@@ -3,6 +3,10 @@ Temporary Ban Patch
 Allow temporary bans for admins on your GHost++.
 Bans can now expire after a specific time. You can choose the time.
 
+Ready patched bot:
+------------------
+https://github.com/Grief-Code/GHostPatchedBot/commit/c90757554deaba2ee6d18ebc5cd08ec69df71ae2
+
 Changed commands:
 -----------------
 - !addban <playername> <reason>

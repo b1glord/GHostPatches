@@ -54,3 +54,73 @@ while($row = mysql_fetch_array($result)) {
 </body>
 </html>
 ````
+
+Another PHP file:
+-----------------
+````PHP
+<?php
+define('DB_HOST', 'localhost');
+define('DB_USER', 'root');
+define('DB_PASS', '');
+define('DB_NAME', 'ghost');
+
+$id = !empty($_GET['id']) ? (int)$_GET['id'] : 0;
+
+if($id):
+   $mysqli = new mysqli(DB_HOST, DB_USER, DB_PASS, DB_NAME);
+
+   if($mysqli->connect_errno)
+      exit(printf("Connect failed: %s\n", $mysqli->connect_error));
+
+   $sql = '
+      SELECT
+         `botid`,
+         `gamename`,
+         `usernames`
+      FROM
+         `gamelist`
+      WHERE `id` = ' . $id;
+
+   if($finfo = $mysqli->query($sql)->fetch_row())
+   {
+      $botid = $finfo[0];
+      $gamename = $finfo[1];
+      $players = $finfo[2];
+?>
+<style>*{color:#444;font:13px Tahoma;}h2{font:16px Georgia;}table,th,td{border:1px solid #333;border-collapse:collapse;}tr:nth-child(odd) td{background-color:rgba(235,235,235,.75);}th,td{padding:3px 5px;}th{background-color:#407499;color:#FFF;}</style>
+
+<h2>Gamename: <?php echo $gamename; ?></h2>
+<table class="lobby">
+   <tr>
+      <th>Player Name</th>
+      <th>Gateway</th>
+      <th>Ping</th>
+   </tr>
+<?php
+      $player = explode("\t", $players);
+      $x = 0;
+
+      for($i = 0; $i < count($player) - 2; $i += 3):
+         $player_name = $player[$i];
+         $gateway = $player[$i + 1];
+         $ping = $player[$i + 2];
+
+         if(!empty($player_name)):
+?>
+   <tr>
+      <td><?php echo $player_name; ?></td>
+      <td><?php echo $gateway; ?></td>
+      <td><?php echo $ping; ?> ms</td>
+   </tr>
+<?php
+         else:
+?>
+   <tr><td>--</td><td>--</td><td>--</td></tr>
+<?php
+         endif;
+      endfor;
+   }
+   else
+      echo '<tr><td colspan="3"><h3>No users found for this game.</h3></td></tr>';
+endif;
+````
