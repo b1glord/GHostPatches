@@ -1,0 +1,985 @@
+From 3335e3e5eec591bddd858cdef6c1b20d8624cdef Mon Sep 17 00:00:00 2001
+From: Grief-Code <hasgrief@googlemail.com>
+Date: Tue, 28 Jan 2014 19:34:57 +0000
+Subject: [PATCH] Temporary ban patch
+
+---
+ bnet.cpp              | 124 +++++++++++++++++++++++++++++++++--
+ bnet.h                |   3 +
+ game.cpp              | 145 +++++++++++++++++++++++++++++++++++++++--
+ ghostdb.cpp           |  19 +++++-
+ ghostdb.h             |  26 +++++++-
+ ghostdbmysql.cpp      |  51 +++++++++++++--
+ ghostdbmysql.h        |  23 +++++--
+ ghostdbsqlite.cpp     |  45 +++++++++++--
+ ghostdbsqlite.h       |   9 ++-
+ ../language.cfg          |   8 ++-
+ language.cpp          |  30 +++++++++
+ language.h            |   4 ++
+ ../mysql_create_tables_v2.sql |   3 +-
+ 13 files changed, 456 insertions(+), 34 deletions(-)
+
+diff --git a/bnet.cpp b/bnet.cpp
+index ad23a2b..0f0aba4 100644
+--- a/bnet.cpp
++++ b/bnet.cpp
+@@ -55,6 +55,7 @@
+ 	m_BNCSUtil = new CBNCSUtilInterface( nUserName, nUserPassword );
+ 	m_CallableAdminList = m_GHost->m_DB->ThreadedAdminList( nServer );
+ 	m_CallableBanList = m_GHost->m_DB->ThreadedBanList( nServer );
++    m_CallableTBanRemove = m_GHost->m_DB->ThreadedTBanRemove( nServer );
+ 	m_Exiting = false;
+ 	m_Server = nServer;
+ 	string LowerServer = m_Server;
+@@ -126,6 +127,7 @@
+ 	m_FrequencyDelayTimes = 0;
+ 	m_LastAdminRefreshTime = GetTime( );
+ 	m_LastBanRefreshTime = GetTime( );
++    m_LastTBanRemoveRefreshTime = GetTime( );
+ 	m_FirstConnect = true;
+ 	m_WaitingToConnect = true;
+ 	m_LoggedIn = false;
+@@ -185,6 +187,9 @@
+ 	if( m_CallableBanList )
+ 		m_GHost->m_Callables.push_back( m_CallableBanList );
+ 
++    if( m_CallableTBanRemove )
++        m_GHost->m_Callables.push_back( m_CallableTBanRemove );
++
+ 	for( vector<CDBBan *> :: iterator i = m_Bans.begin( ); i != m_Bans.end( ); ++i )
+ 		delete *i;
+ }
+@@ -305,7 +310,10 @@ bool CBNET :: Update( void *fd, void *send_fd )
+ 			if( i->second->GetResult( ) )
+ 			{
+ 				AddBan( i->second->GetUser( ), i->second->GetIP( ), i->second->GetGameName( ), i->second->GetAdmin( ), i->second->GetReason( ) );
+-				QueueChatCommand( m_GHost->m_Language->BannedUser( i->second->GetServer( ), i->second->GetUser( ) ), i->first, !i->first.empty( ) );
++                if(i->second->GetBanTime() != 0 )
++                    QueueChatCommand( m_GHost->m_Language->BannedUser( i->second->GetServer( ), i->second->GetUser( ) ), i->first, !i->first.empty( ) );
++                else
++                    QueueChatCommand( m_GHost->m_Language->PermBannedUser( i->second->GetServer( ), i->second->GetUser( ) ), i->first, !i->first.empty( ) );
+ 			}
+ 			else
+ 				QueueChatCommand( m_GHost->m_Language->ErrorBanningUser( i->second->GetServer( ), i->second->GetUser( ) ), i->first, !i->first.empty( ) );
+@@ -416,9 +424,9 @@ bool CBNET :: Update( void *fd, void *send_fd )
+ 		m_LastAdminRefreshTime = GetTime( );
+ 	}
+ 
+-	// refresh the ban list every 60 minutes
++    // refresh the ban list every 5 minutes
+ 
+-	if( !m_CallableBanList && GetTime( ) - m_LastBanRefreshTime >= 3600 )
++    if( !m_CallableBanList && GetTime( ) - m_LastBanRefreshTime >= 300 )
+ 		m_CallableBanList = m_GHost->m_DB->ThreadedBanList( m_Server );
+ 
+ 	if( m_CallableBanList && m_CallableBanList->GetReady( ) )
+@@ -435,6 +443,17 @@ bool CBNET :: Update( void *fd, void *send_fd )
+ 		m_LastBanRefreshTime = GetTime( );
+ 	}
+ 
++    if( !m_CallableTBanRemove && GetTime( ) - m_LastTBanRemoveRefreshTime >= 300 )
++        m_CallableTBanRemove = m_GHost->m_DB->ThreadedTBanRemove( m_Server );
++
++    if( m_CallableTBanRemove && m_CallableTBanRemove->GetReady( ) )
++    {
++        m_GHost->m_DB->RecoverCallable( m_CallableTBanRemove );
++        delete m_CallableTBanRemove;
++        m_CallableTBanRemove = NULL;
++        m_LastBanRefreshTime = GetTime( );
++    }
++
+ 	// we return at the end of each if statement so we don't have to deal with errors related to the order of the if statements
+ 	// that means it might take a few ms longer to complete a task involving multiple steps (in this case, reconnecting) due to blocking or sleeping
+ 	// but it's not a big deal at all, maybe 100ms in the worst possible case (based on a 50ms blocking time)
+@@ -1067,9 +1086,106 @@ void CBNET :: ProcessChatEvent( CIncomingChatEvent *chatEvent )
+ 					if( IsBannedName( Victim ) )
+ 						QueueChatCommand( m_GHost->m_Language->UserIsAlreadyBanned( m_Server, Victim ), User, Whisper );
+ 					else
+-						m_PairedBanAdds.push_back( PairedBanAdd( Whisper ? User : string( ), m_GHost->m_DB->ThreadedBanAdd( m_Server, Victim, string( ), string( ), User, Reason ) ) );
++                        m_PairedBanAdds.push_back( PairedBanAdd( Whisper ? User : string( ), m_GHost->m_DB->ThreadedBanAdd( m_Server, Victim, string( ), string( ), User, Reason, 0 ) ) );
+ 				}
+ 
++               //
++               // !TEMPBAN
++               // !TBAN
++               //
++               else if( ( Command == "tempban" || Command == "tban" ) && !Payload.empty( ) )
++               {
++                       // extract the victim and the reason
++                       // e.g. "Varlock leaver after dying" -> victim: "Varlock", reason: "leaver after dying"
++
++                       string Victim;
++                       string Reason;
++
++                       uint32_t Amount;
++                       uint32_t BanTime;
++                       string Suffix;
++
++                       stringstream SS;
++                       SS << Payload;
++                       SS >> Victim;
++
++                       if( SS.fail( ) || Victim.empty() || Victim.size() < 3 )
++                               CONSOLE_Print( "[TEMPBAN] bad input #1 to the !TEMPBAN command" );
++                       else
++                       {
++                               SS >> Amount;
++
++                               if( SS.fail( ) || Amount == 0 )
++                                       CONSOLE_Print( "[TEMPBAN] bad input #2 to !TEMPBAN command" );
++                               else
++                               {
++                                       SS >> Suffix;
++
++                                       if (SS.fail() || Suffix.empty())
++                                               CONSOLE_Print( "[TEMPBAN] bad input #3 to the autohost command" );
++                                       else
++                                       {
++                                               transform( Suffix.begin( ), Suffix.end( ), Suffix.begin( ), ::tolower );
++
++                                               // handle suffix
++                                               // valid suffix is: hour, h, week, w, day, d, month, m
++
++                                               bool ValidSuffix = false;
++                                               if (Suffix == "hour" || Suffix == "hours" || Suffix == "h")
++                                               {
++                                                       BanTime = Amount * 3600;
++                                                       ValidSuffix = true;
++                                               }
++                                               else if (Suffix == "day" || Suffix == "days" || Suffix == "d")
++                                               {
++                                                       BanTime = Amount * 86400;
++                                                       ValidSuffix = true;
++                                               }
++                                               else if (Suffix == "week" || Suffix == "weeks" || Suffix == "w")
++                                               {
++                                                       BanTime = Amount * 604800;
++                                                       ValidSuffix = true;
++                                               }
++                                               else if (Suffix == "month" || Suffix == "months" || Suffix == "m")
++                                               {
++                                                       BanTime = Amount * 2419200;
++                                                       ValidSuffix = true;
++                                               }
++
++                                               if (ValidSuffix)
++                                               {
++                                                       if (!SS.eof())
++                                                       {
++                                                               getline( SS, Reason );
++                                                               string :: size_type Start = Reason.find_first_not_of( " " );
++
++                                                               if( Start != string :: npos )
++                                                                       Reason = Reason.substr( Start );
++                                                       }
++
++                                                       if( IsBannedName( Victim ) )
++                                                               QueueChatCommand( m_GHost->m_Language->UserIsAlreadyBanned( m_Server, Victim ), User, Whisper );
++                                                       else
++                                                       {
++                                                               if( !Reason.empty() )
++                                                               {
++                                                                       m_PairedBanAdds.push_back( PairedBanAdd( Whisper ? User : string( ), m_GHost->m_DB->ThreadedBanAdd( m_Server, Victim, string( ), string( ), User, Reason, BanTime ) ) );
++                                                                       //QueueChatCommand( "Temporary ban: " + Victim + " for " + UTIL_ToString(Amount) + " " + Suffix + " with reason: " + Reason, User, Whisper);
++                                                               }
++                                                               else
++                                                                       QueueChatCommand( m_GHost->m_Language->ErrorMissingReason(), User, Whisper );
++                                                       }
++
++                                               }
++                                               else
++                                               {
++                                                       QueueChatCommand( m_GHost->m_Language->ErrorBanningWrongSuffix( Suffix ), User, Whisper);
++                                               }
++                                       }
++                               }
++                       }
++               }
++
+ 				//
+ 				// !ANNOUNCE
+ 				//
+diff --git a/bnet.h b/bnet.h
+index 1d323fc..8993fd0 100644
+--- a/bnet.h
++++ b/bnet.h
+@@ -41,6 +41,7 @@
+ class CCallableBanAdd;
+ class CCallableBanRemove;
+ class CCallableBanList;
++class CCallableTBanRemove;
+ class CCallableGamePlayerSummaryCheck;
+ class CCallableDotAPlayerSummaryCheck;
+ class CDBBan;
+@@ -78,6 +79,7 @@ class CBNET
+ 	vector<PairedDPSCheck> m_PairedDPSChecks;		// vector of paired threaded database DotA player summary checks in progress
+ 	CCallableAdminList *m_CallableAdminList;		// threaded database admin list in progress
+ 	CCallableBanList *m_CallableBanList;			// threaded database ban list in progress
++    CCallableTBanRemove *m_CallableTBanRemove;      // threaded database removing temp bans query
+ 	vector<string> m_Admins;						// vector of cached admins
+ 	vector<CDBBan *> m_Bans;						// vector of cached bans
+ 	bool m_Exiting;									// set to true and this class will be deleted next update
+@@ -113,6 +115,7 @@ class CBNET
+ 	uint32_t m_FrequencyDelayTimes;
+ 	uint32_t m_LastAdminRefreshTime;				// GetTime when the admin list was last refreshed from the database
+ 	uint32_t m_LastBanRefreshTime;					// GetTime when the ban list was last refreshed from the database
++    uint32_t m_LastTBanRemoveRefreshTime;           // GetTime when the bans were removed last time from the database
+ 	bool m_FirstConnect;							// if we haven't tried to connect to battle.net yet
+ 	bool m_WaitingToConnect;						// if we're waiting to reconnect to battle.net after being disconnected
+ 	bool m_LoggedIn;								// if we've logged into battle.net or not
+diff --git a/game.cpp b/game.cpp
+index 41e3ba7..7db7bb9 100644
+--- a/game.cpp
++++ b/game.cpp
+@@ -171,7 +171,10 @@ bool CGame :: Update( void *fd, void *send_fd )
+ 						(*j)->AddBan( i->second->GetUser( ), i->second->GetIP( ), i->second->GetGameName( ), i->second->GetAdmin( ), i->second->GetReason( ) );
+ 				}
+ 
+-				SendAllChat( m_GHost->m_Language->PlayerWasBannedByPlayer( i->second->GetServer( ), i->second->GetUser( ), i->first ) );
++                if(i->second->GetBanTime() != 0 )
++                    SendAllChat( m_GHost->m_Language->PlayerWasBannedByPlayer( i->second->GetServer( ), i->second->GetUser( ), i->first ) );
++                else
++                    SendAllChat( m_GHost->m_Language->PlayerWasPermBannedByPlayer( i->second->GetServer( ), i->second->GetUser( ), i->first ) );
+ 			}
+ 
+ 			m_GHost->m_DB->RecoverCallable( i->second );
+@@ -451,7 +454,7 @@ bool CGame :: EventPlayerBotCommand( CGamePlayer *player, string command, string
+ 					if( Matches == 0 )
+ 						SendAllChat( m_GHost->m_Language->UnableToBanNoMatchesFound( Victim ) );
+ 					else if( Matches == 1 )
+-						m_PairedBanAdds.push_back( PairedBanAdd( User, m_GHost->m_DB->ThreadedBanAdd( LastMatch->GetServer( ), LastMatch->GetName( ), LastMatch->GetIP( ), m_GameName, User, Reason ) ) );
++                        m_PairedBanAdds.push_back( PairedBanAdd( User, m_GHost->m_DB->ThreadedBanAdd( LastMatch->GetServer( ), LastMatch->GetName( ), LastMatch->GetIP( ), m_GameName, User, Reason, 0 ) ) );
+ 					else
+ 						SendAllChat( m_GHost->m_Language->UnableToBanFoundMoreThanOneMatch( Victim ) );
+ 				}
+@@ -463,12 +466,139 @@ bool CGame :: EventPlayerBotCommand( CGamePlayer *player, string command, string
+ 					if( Matches == 0 )
+ 						SendAllChat( m_GHost->m_Language->UnableToBanNoMatchesFound( Victim ) );
+ 					else if( Matches == 1 )
+-						m_PairedBanAdds.push_back( PairedBanAdd( User, m_GHost->m_DB->ThreadedBanAdd( LastMatch->GetJoinedRealm( ), LastMatch->GetName( ), LastMatch->GetExternalIPString( ), m_GameName, User, Reason ) ) );
++                        m_PairedBanAdds.push_back( PairedBanAdd( User, m_GHost->m_DB->ThreadedBanAdd( LastMatch->GetJoinedRealm( ), LastMatch->GetName( ), LastMatch->GetExternalIPString( ), m_GameName, User, Reason, 0 ) ) );
+ 					else
+ 						SendAllChat( m_GHost->m_Language->UnableToBanFoundMoreThanOneMatch( Victim ) );
+ 				}
+ 			}
+ 
++            //
++            // !TEMPBAN
++            // !TBAN
++            //
++
++            if( ( Command == "tempban" || Command == "tban" || Command == "tb" ) && !Payload.empty( ) )
++            {
++                    // extract the victim and the reason
++                    // e.g. "Varlock leaver after dying" -> victim: "Varlock", reason: "leaver after dying"
++
++                    string Victim;
++                    string Reason;
++
++                    uint32_t Amount;
++                    uint32_t BanTime;
++                    string Suffix;
++
++                    stringstream SS;
++                    SS << Payload;
++                    SS >> Victim;
++
++                    if( SS.fail( ) || Victim.empty() || Victim.size() < 3 )
++                            CONSOLE_Print( "[TEMPBAN] bad input #1 to !TEMPBAN command" );
++                    else
++                    {
++                            SS >> Amount;
++
++                            if( SS.fail( ) || Amount == 0 )
++                                    CONSOLE_Print( "[TEMPBAN] bad input #2 to !TEMPBAN command" );
++                            else
++                            {
++                                    SS >> Suffix;
++
++                                    if (SS.fail() || Suffix.empty())
++                                            CONSOLE_Print( "[TEMPBAN] bad input #3 to autohost command" );
++                                    else
++                                    {
++                                            uint32_t BanTime = 0;
++
++                                            // handle suffix
++                                            // valid suffix is: hour, h, week, w, day, d, month, m
++                                            bool ValidSuffix = false;
++                                            transform( Suffix.begin( ), Suffix.end( ), Suffix.begin( ), ::tolower );
++
++                                            if (Suffix == "hour" || Suffix == "hours" || Suffix == "h")
++                                            {
++                                                    BanTime = Amount * 3600;
++                                                    ValidSuffix = true;
++                                            }
++                                            else if (Suffix == "day" || Suffix == "days" || Suffix == "d")
++                                            {
++                                                    BanTime = Amount * 86400;
++                                                    ValidSuffix = true;
++                                            }
++                                            else if (Suffix == "week" || Suffix == "weeks" || Suffix == "w")
++                                            {
++                                                    BanTime = Amount * 604800;
++                                                    ValidSuffix = true;
++                                            }
++                                            else if (Suffix == "month" || Suffix == "months" || Suffix == "m")
++                                            {
++                                                    BanTime = Amount * 2419200;
++                                                    ValidSuffix = true;
++                                            }
++
++                                            if (ValidSuffix)
++                                            {
++
++                                                    if (!SS.eof())
++                                                    {
++                                                            getline( SS, Reason );
++                                                            string :: size_type Start = Reason.find_first_not_of( " " );
++
++                                                            if( Start != string :: npos )
++                                                                    Reason = Reason.substr( Start );
++                                                    }
++
++                                                    if( m_GameLoaded )
++                                                    {
++                                                            string VictimLower = Victim;
++                                                            transform( VictimLower.begin( ), VictimLower.end( ), VictimLower.begin( ), ::tolower );
++                                                            uint32_t Matches = 0;
++                                                            CDBBan *LastMatch = NULL;
++                                                            // try to match each player with the passed string (e.g. "Varlock" would be matched with "lock")
++                                                            // we use the m_DBBans vector for this in case the player already left and thus isn't in the m_Players vector anymore
++
++                                                            for( vector<CDBBan *> :: iterator i = m_DBBans.begin( ); i != m_DBBans.end( ); i++ )
++                                                            {
++                                                                    string TestName = (*i)->GetName( );
++                                                                    transform( TestName.begin( ), TestName.end( ), TestName.begin( ), ::tolower );
++
++                                                                    if( TestName.find( VictimLower ) != string :: npos )
++                                                                    {
++                                                                            Matches++;
++                                                                            LastMatch = *i;
++                                                                    }
++                                                            }
++
++                                                            if( Matches == 0 )
++                                                                    SendAllChat( m_GHost->m_Language->UnableToBanNoMatchesFound( Victim ) );
++                                                            else if( Matches == 1 )
++                                                                m_PairedBanAdds.push_back( PairedBanAdd( User, m_GHost->m_DB->ThreadedBanAdd( LastMatch->GetServer( ), LastMatch->GetName( ), LastMatch->GetIP( ), m_GameName, User, Reason, BanTime ) ) );
++                                                            else
++                                                                    SendAllChat( m_GHost->m_Language->UnableToBanFoundMoreThanOneMatch( Victim ) );
++                                                    }
++                                                    else
++                                                    {
++                                                            CGamePlayer *LastMatch = NULL;
++                                                            uint32_t Matches = GetPlayerFromNamePartial( Victim, &LastMatch );
++
++                                                            if( Matches == 0 )
++                                                                    SendAllChat( m_GHost->m_Language->UnableToBanNoMatchesFound( Victim ) );
++                                                            else if( Matches == 1 )
++                                                                m_PairedBanAdds.push_back( PairedBanAdd( User, m_GHost->m_DB->ThreadedBanAdd( LastMatch->GetJoinedRealm( ), LastMatch->GetName( ), LastMatch->GetExternalIPString( ), m_GameName, User, Reason, BanTime ) ) );
++                                                            else
++                                                                    SendAllChat( m_GHost->m_Language->UnableToBanFoundMoreThanOneMatch( Victim ) );
++                                                    }
++                                            }
++                                            else
++                                            {
++                                                    SendChat( player, m_GHost->m_Language->ErrorBanningWrongSuffix(Suffix) );
++                                            }
++                                    }
++                            }
++                    }
++            }
++
+ 			//
+ 			// !ANNOUNCE
+ 			//
+@@ -558,7 +688,14 @@ bool CGame :: EventPlayerBotCommand( CGamePlayer *player, string command, string
+ 			//
+ 
+ 			else if( Command == "banlast" && m_GameLoaded && !m_GHost->m_BNETs.empty( ) && m_DBBanLast )
+-				m_PairedBanAdds.push_back( PairedBanAdd( User, m_GHost->m_DB->ThreadedBanAdd( m_DBBanLast->GetServer( ), m_DBBanLast->GetName( ), m_DBBanLast->GetIP( ), m_GameName, User, Payload ) ) );
++                m_PairedBanAdds.push_back( PairedBanAdd( User, m_GHost->m_DB->ThreadedBanAdd( m_DBBanLast->GetServer( ), m_DBBanLast->GetName( ), m_DBBanLast->GetIP( ), m_GameName, User, Payload, 0 ) ) );
++
++            //
++            // !TBANLAST
++            //
++
++            else if( ( Command == "tbanlast" || Command == "tbl" ) && m_GameLoaded && m_DBBanLast )
++                m_PairedBanAdds.push_back( PairedBanAdd( User, m_GHost->m_DB->ThreadedBanAdd( m_DBBanLast->GetServer( ), m_DBBanLast->GetName( ), m_DBBanLast->GetIP( ), m_GameName, User, Payload, 432000 ) ) );
+ 
+ 			//
+ 			// !CHECK
+diff --git a/ghostdb.cpp b/ghostdb.cpp
+index e0ac2c7..082db0f 100644
+--- a/ghostdb.cpp
++++ b/ghostdb.cpp
+@@ -87,7 +87,7 @@ CDBBan *CGHostDB :: BanCheck( string server, string user, string ip )
+ 	return NULL;
+ }
+ 
+-bool CGHostDB :: BanAdd( string server, string user, string ip, string gamename, string admin, string reason )
++bool CGHostDB :: BanAdd( string server, string user, string ip, string gamename, string admin, string reason, uint32_t bantime )
+ {
+ 	return false;
+ }
+@@ -107,6 +107,11 @@ bool CGHostDB :: BanRemove( string user )
+ 	return vector<CDBBan *>( );
+ }
+ 
++bool CGHostDB :: TBanRemove( string server )
++{
++    return false;
++}
++
+ uint32_t CGHostDB :: GameAdd( string server, string map, string gamename, string ownername, uint32_t duration, uint32_t gamestate, string creatorname, string creatorserver )
+ {
+ 	return 0;
+@@ -222,7 +227,7 @@ CCallableBanCheck *CGHostDB :: ThreadedBanCheck( string server, string user, str
+ 	return NULL;
+ }
+ 
+-CCallableBanAdd *CGHostDB :: ThreadedBanAdd( string server, string user, string ip, string gamename, string admin, string reason )
++CCallableBanAdd *CGHostDB :: ThreadedBanAdd( string server, string user, string ip, string gamename, string admin, string reason, uint32_t bantime )
+ {
+ 	return NULL;
+ }
+@@ -242,6 +247,11 @@ CCallableBanList *CGHostDB :: ThreadedBanList( string server )
+ 	return NULL;
+ }
+ 
++CCallableTBanRemove *CGHostDB :: ThreadedTBanRemove( string server )
++{
++    return NULL;
++}
++
+ CCallableGameAdd *CGHostDB :: ThreadedGameAdd( string server, string map, string gamename, string ownername, uint32_t duration, uint32_t gamestate, string creatorname, string creatorserver )
+ {
+ 	return NULL;
+@@ -367,6 +377,11 @@ void CBaseCallable :: Close( )
+ 	// don't delete anything in m_Result here, it's the caller's responsibility
+ }
+ 
++CCallableTBanRemove :: ~CCallableTBanRemove( )
++{
++
++}
++
+ CCallableGameAdd :: ~CCallableGameAdd( )
+ {
+ 
+diff --git a/ghostdb.h b/ghostdb.h
+index b9fec7c..47d430f 100644
+--- a/ghostdb.h
++++ b/ghostdb.h
+@@ -36,6 +36,7 @@
+ class CCallableBanAdd;
+ class CCallableBanRemove;
+ class CCallableBanList;
++class CCallableTBanRemove;
+ class CCallableGameAdd;
+ class CCallableGamePlayerAdd;
+ class CCallableGamePlayerSummaryCheck;
+@@ -81,10 +82,11 @@ class CGHostDB
+ 	virtual vector<string> AdminList( string server );
+ 	virtual uint32_t BanCount( string server );
+ 	virtual CDBBan *BanCheck( string server, string user, string ip );
+-	virtual bool BanAdd( string server, string user, string ip, string gamename, string admin, string reason );
++    virtual bool BanAdd( string server, string user, string ip, string gamename, string admin, string reason, uint32_t bantime );
+ 	virtual bool BanRemove( string server, string user );
+ 	virtual bool BanRemove( string user );
+ 	virtual vector<CDBBan *> BanList( string server );
++    virtual bool TBanRemove( string server );
+ 	virtual uint32_t GameAdd( string server, string map, string gamename, string ownername, uint32_t duration, uint32_t gamestate, string creatorname, string creatorserver );
+ 	virtual uint32_t GamePlayerAdd( uint32_t gameid, string name, string ip, uint32_t spoofed, string spoofedrealm, uint32_t reserved, uint32_t loadingtime, uint32_t left, string leftreason, uint32_t team, uint32_t colour );
+ 	virtual uint32_t GamePlayerCount( string name );
+@@ -111,10 +113,11 @@ class CGHostDB
+ 	virtual CCallableAdminList *ThreadedAdminList( string server );
+ 	virtual CCallableBanCount *ThreadedBanCount( string server );
+ 	virtual CCallableBanCheck *ThreadedBanCheck( string server, string user, string ip );
+-	virtual CCallableBanAdd *ThreadedBanAdd( string server, string user, string ip, string gamename, string admin, string reason );
++    virtual CCallableBanAdd *ThreadedBanAdd( string server, string user, string ip, string gamename, string admin, string reason, uint32_t bantime );
+ 	virtual CCallableBanRemove *ThreadedBanRemove( string server, string user );
+ 	virtual CCallableBanRemove *ThreadedBanRemove( string user );
+ 	virtual CCallableBanList *ThreadedBanList( string server );
++    virtual CCallableTBanRemove *ThreadedTBanRemove( string server );
+ 	virtual CCallableGameAdd *ThreadedGameAdd( string server, string map, string gamename, string ownername, uint32_t duration, uint32_t gamestate, string creatorname, string creatorserver );
+ 	virtual CCallableGamePlayerAdd *ThreadedGamePlayerAdd( uint32_t gameid, string name, string ip, uint32_t spoofed, string spoofedrealm, uint32_t reserved, uint32_t loadingtime, uint32_t left, string leftreason, uint32_t team, uint32_t colour );
+ 	virtual CCallableGamePlayerSummaryCheck *ThreadedGamePlayerSummaryCheck( string name );
+@@ -298,10 +301,11 @@ class CCallableBanAdd : virtual public CBaseCallable
+ 	string m_GameName;
+ 	string m_Admin;
+ 	string m_Reason;
++    uint32_t m_BanTime;
+ 	bool m_Result;
+ 
+ public:
+-	CCallableBanAdd( string nServer, string nUser, string nIP, string nGameName, string nAdmin, string nReason ) : CBaseCallable( ), m_Server( nServer ), m_User( nUser ), m_IP( nIP ), m_GameName( nGameName ), m_Admin( nAdmin ), m_Reason( nReason ), m_Result( false ) { }
++    CCallableBanAdd( string nServer, string nUser, string nIP, string nGameName, string nAdmin, string nReason, uint32_t nBanTime ) : CBaseCallable( ), m_Server( nServer ), m_User( nUser ), m_IP( nIP ), m_GameName( nGameName ), m_Admin( nAdmin ), m_Reason( nReason ), m_BanTime( nBanTime ), m_Result( false ) { }
+ 	virtual ~CCallableBanAdd( );
+ 
+ 	virtual string GetServer( )				{ return m_Server; }
+@@ -310,6 +314,7 @@ class CCallableBanAdd : virtual public CBaseCallable
+ 	virtual string GetGameName( )			{ return m_GameName; }
+ 	virtual string GetAdmin( )				{ return m_Admin; }
+ 	virtual string GetReason( )				{ return m_Reason; }
++    virtual uint32_t GetBanTime( )          { return m_BanTime; }
+ 	virtual bool GetResult( )				{ return m_Result; }
+ 	virtual void SetResult( bool nResult )	{ m_Result = nResult; }
+ };
+@@ -345,6 +350,21 @@ class CCallableBanList : virtual public CBaseCallable
+ 	virtual void SetResult( vector<CDBBan *> nResult )	{ m_Result = nResult; }
+ };
+ 
++class CCallableTBanRemove : virtual public CBaseCallable
++{
++protected:
++    string m_Server;
++    bool m_Result;
++
++public:
++    CCallableTBanRemove( string nServer ) : CBaseCallable( ), m_Server( nServer ), m_Result( false ) { }
++    virtual ~CCallableTBanRemove( );
++
++    virtual string GetServer( )				{ return m_Server; }
++    virtual bool GetResult( )				{ return m_Result; }
++    virtual void SetResult( bool nResult )	{ m_Result = nResult; }
++};
++
+ class CCallableGameAdd : virtual public CBaseCallable
+ {
+ protected:
+diff --git a/ghostdbmysql.cpp b/ghostdbmysql.cpp
+index 1a64df2..d47ea77 100644
+--- a/ghostdbmysql.cpp
++++ b/ghostdbmysql.cpp
+@@ -240,14 +240,14 @@ CCallableBanCheck *CGHostDBMySQL :: ThreadedBanCheck( string server, string user
+ 	return Callable;
+ }
+ 
+-CCallableBanAdd *CGHostDBMySQL :: ThreadedBanAdd( string server, string user, string ip, string gamename, string admin, string reason )
++CCallableBanAdd *CGHostDBMySQL :: ThreadedBanAdd( string server, string user, string ip, string gamename, string admin, string reason, uint32_t bantime )
+ {
+ 	void *Connection = GetIdleConnection( );
+ 
+ 	if( !Connection )
+                 ++m_NumConnections;
+ 
+-	CCallableBanAdd *Callable = new CMySQLCallableBanAdd( server, user, ip, gamename, admin, reason, Connection, m_BotID, m_Server, m_Database, m_User, m_Password, m_Port );
++    CCallableBanAdd *Callable = new CMySQLCallableBanAdd( server, user, ip, gamename, admin, reason, bantime, Connection, m_BotID, m_Server, m_Database, m_User, m_Password, m_Port );
+ 	CreateThread( Callable );
+         ++m_OutstandingCallables;
+ 	return Callable;
+@@ -292,6 +292,20 @@ CCallableBanList *CGHostDBMySQL :: ThreadedBanList( string server )
+ 	return Callable;
+ }
+ 
++CCallableTBanRemove *CGHostDBMySQL :: ThreadedTBanRemove( string server )
++{
++    void *Connection = GetIdleConnection( );
++
++    if( !Connection )
++                ++m_NumConnections;
++
++    CCallableTBanRemove *Callable = new CMySQLCallableTBanRemove( server, Connection, m_BotID, m_Server, m_Database, m_User, m_Password, m_Port );
++    CreateThread( Callable );
++        ++m_OutstandingCallables;
++    return Callable;
++}
++
++
+ CCallableGameAdd *CGHostDBMySQL :: ThreadedGameAdd( string server, string map, string gamename, string ownername, uint32_t duration, uint32_t gamestate, string creatorname, string creatorserver )
+ {
+ 	void *Connection = GetIdleConnection( );
+@@ -692,7 +706,7 @@ CDBBan *MySQLBanCheck( void *conn, string *error, uint32_t botid, string server,
+ 	return Ban;
+ }
+ 
+-bool MySQLBanAdd( void *conn, string *error, uint32_t botid, string server, string user, string ip, string gamename, string admin, string reason )
++bool MySQLBanAdd( void *conn, string *error, uint32_t botid, string server, string user, string ip, string gamename, string admin, string reason, uint32_t bantime )
+ {
+ 	transform( user.begin( ), user.end( ), user.begin( ), (int(*)(int))tolower );
+ 	string EscServer = MySQLEscapeString( conn, server );
+@@ -702,7 +716,10 @@ bool MySQLBanAdd( void *conn, string *error, uint32_t botid, string server, stri
+ 	string EscAdmin = MySQLEscapeString( conn, admin );
+ 	string EscReason = MySQLEscapeString( conn, reason );
+ 	bool Success = false;
+-	string Query = "INSERT INTO bans ( botid, server, name, ip, date, gamename, admin, reason ) VALUES ( " + UTIL_ToString( botid ) + ", '" + EscServer + "', '" + EscUser + "', '" + EscIP + "', CURDATE( ), '" + EscGameName + "', '" + EscAdmin + "', '" + EscReason + "' )";
++    string Time = "0000-00-00 00:00:00";
++    if( bantime != 0 )
++        Time = "FROM_UNIXTIME( UNIX_TIMESTAMP( ) + " + UTIL_ToString(bantime) + ")";
++    string Query = "INSERT INTO bans ( botid, server, name, ip, date, gamename, admin, reason, expiredate ) VALUES ( " + UTIL_ToString( botid ) + ", '" + EscServer + "', '" + EscUser + "', '" + EscIP + "', CURDATE( ), '" + EscGameName + "', '" + EscAdmin + "', '" + EscReason + "', "+Time+" )";
+ 
+ 	if( mysql_real_query( (MYSQL *)conn, Query.c_str( ), Query.size( ) ) != 0 )
+ 		*error = mysql_error( (MYSQL *)conn );
+@@ -774,6 +791,20 @@ bool MySQLBanRemove( void *conn, string *error, uint32_t botid, string user )
+ 	return BanList;
+ }
+ 
++bool MySQLTBanRemove( void *conn, string *error, uint32_t botid, string server )
++{
++    string EscServer = MySQLEscapeString( conn, server );
++    bool Success = false;
++    string Query = "DELETE FROM bans WHERE server='" + EscServer + "' AND `expiredate` <= NOW()'";
++
++    if( mysql_real_query( (MYSQL *)conn, Query.c_str( ), Query.size( ) ) != 0 )
++        *error = mysql_error( (MYSQL *)conn );
++    else
++        Success = true;
++
++    return Success;
++}
++
+ uint32_t MySQLGameAdd( void *conn, string *error, uint32_t botid, string server, string map, string gamename, string ownername, uint32_t duration, uint32_t gamestate, string creatorname, string creatorserver )
+ {
+ 	uint32_t RowID = 0;
+@@ -1251,7 +1282,7 @@ void CMySQLCallableBanAdd :: operator( )( )
+ 	Init( );
+ 
+ 	if( m_Error.empty( ) )
+-		m_Result = MySQLBanAdd( m_Connection, &m_Error, m_SQLBotID, m_Server, m_User, m_IP, m_GameName, m_Admin, m_Reason );
++        m_Result = MySQLBanAdd( m_Connection, &m_Error, m_SQLBotID, m_Server, m_User, m_IP, m_GameName, m_Admin, m_Reason, m_BanTime );
+ 
+ 	Close( );
+ }
+@@ -1281,6 +1312,16 @@ void CMySQLCallableBanList :: operator( )( )
+ 	Close( );
+ }
+ 
++void CMySQLCallableTBanRemove :: operator( )( )
++{
++    Init( );
++
++    if( m_Error.empty( ) )
++        m_Result = MySQLTBanRemove( m_Connection, &m_Error, m_SQLBotID, m_Server );
++
++    Close( );
++}
++
+ void CMySQLCallableGameAdd :: operator( )( )
+ {
+ 	Init( );
+diff --git a/ghostdbmysql.h b/ghostdbmysql.h
+index 0a5d8a3..07bfd88 100644
+--- a/ghostdbmysql.h
++++ b/ghostdbmysql.h
+@@ -43,7 +43,8 @@ CREATE TABLE bans (
+ 	date DATETIME NOT NULL,
+ 	gamename VARCHAR(31) NOT NULL,
+ 	admin VARCHAR(15) NOT NULL,
+-	reason VARCHAR(255) NOT NULL
++    reason VARCHAR(255) NOT NULL,
++    expiredate DATETME NOT NULL
+ )
+ 
+ CREATE TABLE games (
+@@ -195,10 +196,11 @@ class CGHostDBMySQL : public CGHostDB
+ 	virtual CCallableAdminList *ThreadedAdminList( string server );
+ 	virtual CCallableBanCount *ThreadedBanCount( string server );
+ 	virtual CCallableBanCheck *ThreadedBanCheck( string server, string user, string ip );
+-	virtual CCallableBanAdd *ThreadedBanAdd( string server, string user, string ip, string gamename, string admin, string reason );
++    virtual CCallableBanAdd *ThreadedBanAdd( string server, string user, string ip, string gamename, string admin, string reason, uint32_t bantime );
+ 	virtual CCallableBanRemove *ThreadedBanRemove( string server, string user );
+ 	virtual CCallableBanRemove *ThreadedBanRemove( string user );
+ 	virtual CCallableBanList *ThreadedBanList( string server );
++    virtual CCallableTBanRemove *ThreadedTBanRemove( string server );
+ 	virtual CCallableGameAdd *ThreadedGameAdd( string server, string map, string gamename, string ownername, uint32_t duration, uint32_t gamestate, string creatorname, string creatorserver );
+ 	virtual CCallableGamePlayerAdd *ThreadedGamePlayerAdd( uint32_t gameid, string name, string ip, uint32_t spoofed, string spoofedrealm, uint32_t reserved, uint32_t loadingtime, uint32_t left, string leftreason, uint32_t team, uint32_t colour );
+ 	virtual CCallableGamePlayerSummaryCheck *ThreadedGamePlayerSummaryCheck( string name );
+@@ -228,10 +230,11 @@ class CGHostDBMySQL : public CGHostDB
+ vector<string> MySQLAdminList( void *conn, string *error, uint32_t botid, string server );
+ uint32_t MySQLBanCount( void *conn, string *error, uint32_t botid, string server );
+ CDBBan *MySQLBanCheck( void *conn, string *error, uint32_t botid, string server, string user, string ip );
+-bool MySQLBanAdd( void *conn, string *error, uint32_t botid, string server, string user, string ip, string gamename, string admin, string reason );
++bool MySQLBanAdd( void *conn, string *error, uint32_t botid, string server, string user, string ip, string gamename, string admin, string reason, uint32_t bantime );
+ bool MySQLBanRemove( void *conn, string *error, uint32_t botid, string server, string user );
+ bool MySQLBanRemove( void *conn, string *error, uint32_t botid, string user );
+ vector<CDBBan *> MySQLBanList( void *conn, string *error, uint32_t botid, string server );
++bool MySQLTBanRemove( void *conn, string *error, uint32_t botid, string server );
+ uint32_t MySQLGameAdd( void *conn, string *error, uint32_t botid, string server, string map, string gamename, string ownername, uint32_t duration, uint32_t gamestate, string creatorname, string creatorserver );
+ uint32_t MySQLGamePlayerAdd( void *conn, string *error, uint32_t botid, uint32_t gameid, string name, string ip, uint32_t spoofed, string spoofedrealm, uint32_t reserved, uint32_t loadingtime, uint32_t left, string leftreason, uint32_t team, uint32_t colour );
+ CDBGamePlayerSummary *MySQLGamePlayerSummaryCheck( void *conn, string *error, uint32_t botid, string name );
+@@ -350,7 +353,7 @@ class CMySQLCallableBanCheck : public CCallableBanCheck, public CMySQLCallable
+ class CMySQLCallableBanAdd : public CCallableBanAdd, public CMySQLCallable
+ {
+ public:
+-	CMySQLCallableBanAdd( string nServer, string nUser, string nIP, string nGameName, string nAdmin, string nReason, void *nConnection, uint32_t nSQLBotID, string nSQLServer, string nSQLDatabase, string nSQLUser, string nSQLPassword, uint16_t nSQLPort ) : CBaseCallable( ), CCallableBanAdd( nServer, nUser, nIP, nGameName, nAdmin, nReason ), CMySQLCallable( nConnection, nSQLBotID, nSQLServer, nSQLDatabase, nSQLUser, nSQLPassword, nSQLPort ) { }
++    CMySQLCallableBanAdd( string nServer, string nUser, string nIP, string nGameName, string nAdmin, string nReason, uint32_t nBanTime, void *nConnection, uint32_t nSQLBotID, string nSQLServer, string nSQLDatabase, string nSQLUser, string nSQLPassword, uint16_t nSQLPort ) : CBaseCallable( ), CCallableBanAdd( nServer, nUser, nIP, nGameName, nAdmin, nReason, nBanTime ), CMySQLCallable( nConnection, nSQLBotID, nSQLServer, nSQLDatabase, nSQLUser, nSQLPassword, nSQLPort ) { }
+ 	virtual ~CMySQLCallableBanAdd( ) { }
+ 
+ 	virtual void operator( )( );
+@@ -368,7 +371,6 @@ class CMySQLCallableBanRemove : public CCallableBanRemove, public CMySQLCallable
+ 	virtual void Init( ) { CMySQLCallable :: Init( ); }
+ 	virtual void Close( ) { CMySQLCallable :: Close( ); }
+ };
+-
+ class CMySQLCallableBanList : public CCallableBanList, public CMySQLCallable
+ {
+ public:
+@@ -380,6 +382,17 @@ class CMySQLCallableBanList : public CCallableBanList, public CMySQLCallable
+ 	virtual void Close( ) { CMySQLCallable :: Close( ); }
+ };
+ 
++class CMySQLCallableTBanRemove : public CCallableTBanRemove, public CMySQLCallable
++{
++public:
++    CMySQLCallableTBanRemove( string nServer, void *nConnection, uint32_t nSQLBotID, string nSQLServer, string nSQLDatabase, string nSQLUser, string nSQLPassword, uint16_t nSQLPort ) : CBaseCallable( ), CCallableTBanRemove( nServer ), CMySQLCallable( nConnection, nSQLBotID, nSQLServer, nSQLDatabase, nSQLUser, nSQLPassword, nSQLPort ) { }
++    virtual ~CMySQLCallableTBanRemove( ) { }
++
++    virtual void operator( )( );
++    virtual void Init( ) { CMySQLCallable :: Init( ); }
++    virtual void Close( ) { CMySQLCallable :: Close( ); }
++};
++
+ class CMySQLCallableGameAdd : public CCallableGameAdd, public CMySQLCallable
+ {
+ public:
+diff --git a/ghostdbsqlite.cpp b/ghostdbsqlite.cpp
+index fbb2a99..8c89bad 100644
+--- a/ghostdbsqlite.cpp
++++ b/ghostdbsqlite.cpp
+@@ -756,12 +756,15 @@ CDBBan *CGHostDBSQLite :: BanCheck( string server, string user, string ip )
+ 	return Ban;
+ }
+ 
+-bool CGHostDBSQLite :: BanAdd( string server, string user, string ip, string gamename, string admin, string reason )
++bool CGHostDBSQLite :: BanAdd( string server, string user, string ip, string gamename, string admin, string reason, uint32_t bantime )
+ {
+ 	transform( user.begin( ), user.end( ), user.begin( ), (int(*)(int))tolower );
+ 	bool Success = false;
+ 	sqlite3_stmt *Statement;
+-	m_DB->Prepare( "INSERT INTO bans ( server, name, ip, date, gamename, admin, reason ) VALUES ( ?, ?, ?, date('now'), ?, ?, ? )", (void **)&Statement );
++    string Time = "0000-00-00 00:00:00";
++    if( bantime != 0 )
++        Time = "datetime('now'+"+UTIL_ToString(bantime)+", 'unixepoch')";
++    m_DB->Prepare( "INSERT INTO bans ( server, name, ip, date, gamename, admin, reason, expiredate ) VALUES ( ?, ?, ?, date('now'), ?, ?, ?, "+Time+") )", (void **)&Statement );
+ 
+ 	if( Statement )
+ 	{
+@@ -870,6 +873,30 @@ bool CGHostDBSQLite :: BanRemove( string user )
+ 	return BanList;
+ }
+ 
++bool CGHostDBSQLite :: TBanRemove( string server )
++{
++    bool Success = false;
++    sqlite3_stmt *Statement;
++    m_DB->Prepare( "DELETE FROM bans WHERE server=? AND expiredate <= date('now')", (void **)&Statement );
++
++    if( Statement )
++    {
++        sqlite3_bind_text( Statement, 1, server.c_str( ), -1, SQLITE_TRANSIENT );
++        int RC = m_DB->Step( Statement );
++
++        if( RC == SQLITE_DONE )
++            Success = true;
++        else if( RC == SQLITE_ERROR )
++            CONSOLE_Print( "[SQLITE3] error removing ban [" + server + "] - " + m_DB->GetError( ) );
++
++        m_DB->Finalize( Statement );
++    }
++    else
++        CONSOLE_Print( "[SQLITE3] prepare error removing ban [" + server + "] - " + m_DB->GetError( ) );
++
++    return Success;
++}
++
+ uint32_t CGHostDBSQLite :: GameAdd( string server, string map, string gamename, string ownername, uint32_t duration, uint32_t gamestate, string creatorname, string creatorserver )
+ {
+ 	uint32_t RowID = 0;
+@@ -1527,10 +1554,10 @@ CCallableBanCheck *CGHostDBSQLite :: ThreadedBanCheck( string server, string use
+ 	return Callable;
+ }
+ 
+-CCallableBanAdd *CGHostDBSQLite :: ThreadedBanAdd( string server, string user, string ip, string gamename, string admin, string reason )
++CCallableBanAdd *CGHostDBSQLite :: ThreadedBanAdd( string server, string user, string ip, string gamename, string admin, string reason, uint32_t bantime )
+ {
+-	CCallableBanAdd *Callable = new CCallableBanAdd( server, user, ip, gamename, admin, reason );
+-	Callable->SetResult( BanAdd( server, user, ip, gamename, admin, reason ) );
++    CCallableBanAdd *Callable = new CCallableBanAdd( server, user, ip, gamename, admin, reason, bantime );
++    Callable->SetResult( BanAdd( server, user, ip, gamename, admin, reason, bantime ) );
+ 	Callable->SetReady( true );
+ 	return Callable;
+ }
+@@ -1551,6 +1578,14 @@ CCallableBanRemove *CGHostDBSQLite :: ThreadedBanRemove( string user )
+ 	return Callable;
+ }
+ 
++CCallableTBanRemove *CGHostDBSQLite :: ThreadedTBanRemove( string server )
++{
++    CCallableTBanRemove *Callable = new CCallableTBanRemove( server );
++    Callable->SetResult( TBanRemove( server ) );
++    Callable->SetReady( true );
++    return Callable;
++}
++
+ CCallableBanList *CGHostDBSQLite :: ThreadedBanList( string server )
+ {
+ 	CCallableBanList *Callable = new CCallableBanList( server );
+diff --git a/ghostdbsqlite.h b/ghostdbsqlite.h
+index 904df44..ad5cd3f 100644
+--- a/ghostdbsqlite.h
++++ b/ghostdbsqlite.h
+@@ -39,7 +39,8 @@ CREATE TABLE bans (
+ 	date TEXT NOT NULL,
+ 	gamename TEXT,
+ 	admin TEXT NOT NULL,
+-	reason TEXT
++    reason TEXT,
++    expiredate TEXT NOT NULL
+ )
+ 
+ CREATE TABLE games (
+@@ -219,10 +220,11 @@ class CGHostDBSQLite : public CGHostDB
+ 	virtual vector<string> AdminList( string server );
+ 	virtual uint32_t BanCount( string server );
+ 	virtual CDBBan *BanCheck( string server, string user, string ip );
+-	virtual bool BanAdd( string server, string user, string ip, string gamename, string admin, string reason );
++    virtual bool BanAdd( string server, string user, string ip, string gamename, string admin, string reason, uint32_t bantime );
+ 	virtual bool BanRemove( string server, string user );
+ 	virtual bool BanRemove( string user );
+ 	virtual vector<CDBBan *> BanList( string server );
++    virtual bool TBanRemove( string server );
+ 	virtual uint32_t GameAdd( string server, string map, string gamename, string ownername, uint32_t duration, uint32_t gamestate, string creatorname, string creatorserver );
+ 	virtual uint32_t GamePlayerAdd( uint32_t gameid, string name, string ip, uint32_t spoofed, string spoofedrealm, uint32_t reserved, uint32_t loadingtime, uint32_t left, string leftreason, uint32_t team, uint32_t colour );
+ 	virtual uint32_t GamePlayerCount( string name );
+@@ -250,10 +252,11 @@ class CGHostDBSQLite : public CGHostDB
+ 	virtual CCallableAdminList *ThreadedAdminList( string server );
+ 	virtual CCallableBanCount *ThreadedBanCount( string server );
+ 	virtual CCallableBanCheck *ThreadedBanCheck( string server, string user, string ip );
+-	virtual CCallableBanAdd *ThreadedBanAdd( string server, string user, string ip, string gamename, string admin, string reason );
++    virtual CCallableBanAdd *ThreadedBanAdd( string server, string user, string ip, string gamename, string admin, string reason, uint32_t bantime );
+ 	virtual CCallableBanRemove *ThreadedBanRemove( string server, string user );
+ 	virtual CCallableBanRemove *ThreadedBanRemove( string user );
+ 	virtual CCallableBanList *ThreadedBanList( string server );
++    virtual CCallableTBanRemove *ThreadedTBanRemove( string server );
+ 	virtual CCallableGameAdd *ThreadedGameAdd( string server, string map, string gamename, string ownername, uint32_t duration, uint32_t gamestate, string creatorname, string creatorserver );
+ 	virtual CCallableGamePlayerAdd *ThreadedGamePlayerAdd( uint32_t gameid, string name, string ip, uint32_t spoofed, string spoofedrealm, uint32_t reserved, uint32_t loadingtime, uint32_t left, string leftreason, uint32_t team, uint32_t colour );
+ 	virtual CCallableGamePlayerSummaryCheck *ThreadedGamePlayerSummaryCheck( string name );
+diff --git a/../language.cfg b/../language.cfg
+index e7679e5..652904f 100644
+--- a/../language.cfg
++++ b/../language.cfg
+@@ -8,7 +8,8 @@ lang_0003 = Added user [$USER$] to the admin database on server [$SERVER$].
+ lang_0004 = Error adding user [$USER$] to the admin database on server [$SERVER$].
+ lang_0005 = You don't have access to that command.
+ lang_0006 = Error. User [$VICTIM$] is already banned on server [$SERVER$].
+-lang_0007 = Banned user [$VICTIM$] on server [$SERVER$].
++lang_0007 = Temporarily banned user [$VICTIM$] on server [$SERVER$].
++lang_0007a = Permanently banned user [$VICTIM$] on server [$SERVER$].
+ lang_0008 = Error banning user [$VICTIM] on server [$SERVER$].
+ lang_0009 = User [$USER$] is an admin on server [$SERVER$].
+ lang_0010 = User [$USER$] is not an admin on server [$SERVER$].
+@@ -53,7 +54,8 @@ lang_0048 = Name spoof detected. The real [$USER$] is in another game.
+ lang_0049 = Countdown aborted!
+ lang_0050 = $VICTIM$ is trying to join the game but is banned.
+ lang_0051 = Unable to ban player [$VICTIM$]. No matches found.
+-lang_0052 = Player [$VICTIM$] was banned by player [$USER$] on server [$SERVER$].
++lang_0052 = Temporarily banned player [$VICTIM$] by player [$USER$] on server [$SERVER$].
++lang_0052a = Permanently banned player [$VICTIM$] by player [$USER$] on server [$SERVER$].
+ lang_0053 = Unable to ban player [$VICTIM$]. Found more than one match.
+ lang_0054 = Added player [$USER$] to the hold list.
+ lang_0055 = Unable to kick player [$VICTIM$]. No matches found.
+@@ -222,3 +224,5 @@ lang_0217 = has lost the connection (connection closed by remote host) but is us
+ lang_0218 = Please wait for me to reconnect ($SECONDS$ seconds remain).
+ lang_0219 = was unrecoverably dropped from GProxy++
+ lang_0220 = Player [$NAME$] reconnected with GProxy++!
++lang_0221 = Error. Missing a reason to ban a player.
++lang_0222 = Error. Wrong suffix. You used [$SUFFIX$]
+diff --git a/language.cpp b/language.cpp
+index a92463e..09f67fe 100644
+--- a/language.cpp
++++ b/language.cpp
+@@ -91,6 +91,14 @@ string CLanguage :: BannedUser( string server, string victim )
+ 	return Out;
+ }
+ 
++string CLanguage :: PermBannedUser( string server, string victim )
++{
++    string Out = m_CFG->GetString( "lang_0007a", "lang_0007a" );
++    UTIL_Replace( Out, "$SERVER$", server );
++    UTIL_Replace( Out, "$VICTIM$", victim );
++    return Out;
++}
++
+ string CLanguage :: ErrorBanningUser( string server, string victim )
+ {
+ 	string Out = m_CFG->GetString( "lang_0008", "lang_0008" );
+@@ -416,6 +424,15 @@ string CLanguage :: PlayerWasBannedByPlayer( string server, string victim, strin
+ 	return Out;
+ }
+ 
++string CLanguage :: PlayerWasPermBannedByPlayer( string server, string victim, string user )
++{
++    string Out = m_CFG->GetString( "lang_0052a", "lang_0052a" );
++    UTIL_Replace( Out, "$SERVER$", server );
++    UTIL_Replace( Out, "$VICTIM$", victim );
++    UTIL_Replace( Out, "$USER$", user );
++    return Out;
++}
++
+ string CLanguage :: UnableToBanFoundMoreThanOneMatch( string victim )
+ {
+ 	string Out = m_CFG->GetString( "lang_0053", "lang_0053" );
+@@ -1533,3 +1550,16 @@ string CLanguage :: PlayerReconnectedWithGProxy( string name )
+ 	UTIL_Replace( Out, "$NAME$", name );
+ 	return Out;
+ }
++
++string CLanguage :: ErrorMissingReason( )
++{
++    string Out = m_CFG->GetString( "lang_0221", "lang_0221" );
++    return Out;
++}
++
++string CLanguage :: ErrorBanningWrongSuffix( string suffix )
++{
++    string Out = m_CFG->GetString( "lang_0222", "lang_0222" );
++    UTIL_Replace( Out, "$SUFFIX$", suffix );
++    return Out;
++}
+diff --git a/language.h b/language.h
+index 01696c2..60b89a7 100644
+--- a/language.h
++++ b/language.h
+@@ -41,6 +41,7 @@ class CLanguage
+ 	string YouDontHaveAccessToThatCommand( );
+ 	string UserIsAlreadyBanned( string server, string victim );
+ 	string BannedUser( string server, string victim );
++    string PermBannedUser( string server, string victim );
+ 	string ErrorBanningUser( string server, string victim );
+ 	string UserIsAnAdmin( string server, string user );
+ 	string UserIsNotAnAdmin( string server, string user );
+@@ -86,6 +87,7 @@ class CLanguage
+ 	string TryingToJoinTheGameButBanned( string victim );
+ 	string UnableToBanNoMatchesFound( string victim );
+ 	string PlayerWasBannedByPlayer( string server, string victim, string user );
++    string PlayerWasPermBannedByPlayer( string server, string victim, string user );
+ 	string UnableToBanFoundMoreThanOneMatch( string victim );
+ 	string AddedPlayerToTheHoldList( string user );
+ 	string UnableToKickNoMatchesFound( string victim );
+@@ -254,6 +256,8 @@ class CLanguage
+ 	string WaitForReconnectSecondsRemain( string seconds );
+ 	string WasUnrecoverablyDroppedFromGProxy( );
+     string PlayerReconnectedWithGProxy( string name );
++    string ErrorMissingReason( );
++    string ErrorBanningWrongSuffix( string suffix );
+ };
+ 
+ #endif
+diff --git a/../mysql_create_tables_v2.sql b/../mysql_create_tables_v2.sql
+index 738bc23..e4b64d2 100644
+--- a/../mysql_create_tables_v2.sql
++++ b/../mysql_create_tables_v2.sql
+@@ -14,7 +14,8 @@ CREATE TABLE bans (
+ 	date DATETIME NOT NULL,
+ 	gamename VARCHAR(31) NOT NULL,
+ 	admin VARCHAR(15) NOT NULL,
+-	reason VARCHAR(255) NOT NULL
++   reason VARCHAR(255) NOT NULL,
++   expiredate DATETIME NOT NULL,
+ );
+ 
+ CREATE TABLE games (
+-- 
+1.8.5.1
+

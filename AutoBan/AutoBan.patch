@@ -1,0 +1,268 @@
+From 97bd32378d02f5bf374f8d40893649dce38733e3 Mon Sep 17 00:00:00 2001
+From: Grief-Code <hasgrief@googlemail.com>
+Date: Tue, 28 Jan 2014 20:48:29 +0000
+Subject: [PATCH] Autoban patch
+
+---
+ AutoBan/default.cfg         |  7 +++++
+ AutoBan/ghost/game.cpp      | 62 +++++++++++++++++++++++++++++++++++++++++++++
+ AutoBan/ghost/game.h        |  1 +
+ AutoBan/ghost/game_base.cpp | 16 ++++++++----
+ AutoBan/ghost/game_base.h   |  1 +
+ AutoBan/ghost/ghost.cpp     |  1 +
+ AutoBan/ghost/ghost.h       |  1 +
+ AutoBan/ghost/language.cpp  |  7 +++++
+ AutoBan/ghost/language.h    |  1 +
+ AutoBan/language.cfg        |  1 +
+ 10 files changed, 93 insertions(+), 5 deletions(-)
+
+diff --git a/../default.cfg b/../default.cfg
+index 618e09c..634bed4 100644
+--- a/../default.cfg
++++ b/../default.cfg
+@@ -275,6 +275,13 @@ bot_matchmakingmethod = 1
+ 
+ bot_mapgametype = 0
+ 
++### the autoban definition
++###  This setting control the autoban, if the value is set to 1, the bot will ban all leavers, disconnects & player errors.
++###  By setting the value to 0 the bot will only ban the real leavers ("has left the game..")
++###  This setting is set to 1 by default.
++
++bot_autobanall = 1
++
+ ############################
+ # ADMIN GAME CONFIGURATION #
+ ############################
+diff --git a/game.cpp b/game.cpp
+index 41e3ba7..be75ffb 100644
+--- a/game.cpp
++++ b/game.cpp
+@@ -78,6 +78,53 @@ class CGamePlayerSortDescByPing
+ 
+ CGame :: ~CGame( )
+ {
++    // autoban
++    uint32_t EndTime = m_GameTicks / 1000;
++    for( vector<CDBGamePlayer *> :: iterator i = m_DBGamePlayers.begin( ); i != m_DBGamePlayers.end( ); ++i )
++    {
++            if( IsAutoBanned( (*i)->GetName( ) ) )
++            {
++                    bool isAdmin = false;
++                    for( vector<CBNET *> :: iterator k = m_GHost->m_BNETs.begin( ); k != m_GHost->m_BNETs.end( ); ++k )
++                    {
++                           if( (*k)->GetServer( ) == (*i)->GetSpoofedRealm( ) )
++                           {
++                                   if( (*k)->IsAdmin( (*i)->GetName( ) ) ) {
++                                        isAdmin = true;
++                                   }
++                                   break;
++                           }
++                    }
++
++                    uint32_t LeftTime = (*i)->GetLeft( );
++                    // make sure that draw games will not ban people who didnt leave.
++                    if( EndTime - LeftTime > 300 )
++                    {
++                            if(! isAdmin )
++                            {
++                                string Reason = "disconnected at";
++                                if((*i)->GetLeftReason( ).find("left")!=string::npos)
++                                    Reason = "left at ";
++
++                                if( EndTime < 300 ) {
++                                    Reason += UTIL_ToString( LeftTime/60 ) + "/" + UTIL_ToString( EndTime/60 )+"min";
++                                } else {
++                                    string EndMin = UTIL_ToString(EndTime/60);
++                                    string EndSec = UTIL_ToString(EndTime%60);
++                                    string LeftMin = UTIL_ToString(LeftTime/60);
++                                    string LeftSec = UTIL_ToString(LeftTime%60);
++                                    if(1==EndSec.size())
++                                        EndSec="0"+EndSec;
++                                    if(1==LeftSec.size())
++                                        LeftSec="0"+LeftSec;
++
++                                    Reason += LeftMin+":"+LeftSec + "/" + EndMin+":"+EndSec;
++                                }
++                                m_GHost->m_Callables.push_back( m_GHost->m_DB->ThreadedBanAdd( (*i)->GetSpoofedRealm(), (*i)->GetName( ), (*i)->GetIP(), m_GameName, "AutoBan", Reason ) );
++                            }
++                    }
++            }
++    }
+ 	if( m_CallableGameAdd && m_CallableGameAdd->GetReady( ) )
+ 	{
+ 		if( m_CallableGameAdd->GetResult( ) > 0 )
+@@ -319,6 +366,10 @@ void CGame :: EventPlayerDeleted( CGamePlayer *player )
+ 			if( (*i)->GetName( ) == player->GetName( ) )
+ 				m_DBBanLast = *i;
+ 		}
++        if( m_GHost->m_AutoBanAll ) {
++            m_AutoBans.push_back( player->GetName( ) );
++            SendAllChat( m_GHost->m_Language->UserMayBanned( player->GetName( ) ) );
++        }
+ 	}
+ }
+ 
+@@ -1841,3 +1892,14 @@ void CGame :: SaveGameData( )
+ 	CONSOLE_Print( "[GAME: " + m_GameName + "] saving game data to database" );
+ 	m_CallableGameAdd = m_GHost->m_DB->ThreadedGameAdd( m_GHost->m_BNETs.size( ) == 1 ? m_GHost->m_BNETs[0]->GetServer( ) : string( ), m_DBGame->GetMap( ), m_GameName, m_OwnerName, m_GameTicks / 1000, m_GameState, m_CreatorName, m_CreatorServer );
+ }
++
++bool CGame :: IsAutoBanned( string name )
++{
++        for( vector<string> :: iterator i = m_AutoBans.begin( ); i != m_AutoBans.end( ); i++ )
++        {
++                if( *i == name )
++                        return true;
++        }
++
++        return false;
++}
+diff --git a/game.h b/game.h
+index 6f6c018..3cc790b 100644
+--- a/game.h
++++ b/game.h
+@@ -53,6 +53,7 @@ class CGame : public CBaseGame
+ 	vector<PairedBanAdd> m_PairedBanAdds;		// vector of paired threaded database ban adds in progress
+ 	vector<PairedGPSCheck> m_PairedGPSChecks;	// vector of paired threaded database game player summary checks in progress
+ 	vector<PairedDPSCheck> m_PairedDPSChecks;	// vector of paired threaded database DotA player summary checks in progress
++    bool IsAutoBanned( string name );           // function for checking if a player is in the autoban vetor
+ 
+ public:
+ 	CGame( CGHost *nGHost, CMap *nMap, CSaveGame *nSaveGame, uint16_t nHostPort, unsigned char nGameState, string nGameName, string nOwnerName, string nCreatorName, string nCreatorServer );
+diff --git a/game_base.cpp b/game_base.cpp
+index 7036c76..82d605d 100644
+--- a/game_base.cpp
++++ b/game_base.cpp
+@@ -1500,7 +1500,7 @@ void CBaseGame :: EventPlayerDisconnectTimedOut( CGamePlayer *player )
+ 		if( !player->GetGProxyDisconnectNoticeSent( ) )
+ 		{
+ 			SendAllChat( player->GetName( ) + " " + m_GHost->m_Language->HasLostConnectionTimedOutGProxy( ) + "." );
+-			player->SetGProxyDisconnectNoticeSent( true );
++            player->SetGProxyDisconnectNoticeSent( true );
+ 		}
+ 
+ 		if( GetTime( ) - player->GetLastGProxyWaitNoticeSentTime( ) >= 20 )
+@@ -1542,7 +1542,7 @@ void CBaseGame :: EventPlayerDisconnectPlayerError( CGamePlayer *player )
+ 	player->SetLeftCode( PLAYERLEAVE_DISCONNECT );
+ 
+ 	if( !m_GameLoading && !m_GameLoaded )
+-		OpenSlot( GetSIDFromPID( player->GetPID( ) ), false );
++        OpenSlot( GetSIDFromPID( player->GetPID( ) ), false );
+ }
+ 
+ void CBaseGame :: EventPlayerDisconnectSocketError( CGamePlayer *player )
+@@ -1552,7 +1552,7 @@ void CBaseGame :: EventPlayerDisconnectSocketError( CGamePlayer *player )
+ 		if( !player->GetGProxyDisconnectNoticeSent( ) )
+ 		{
+ 			SendAllChat( player->GetName( ) + " " + m_GHost->m_Language->HasLostConnectionSocketErrorGProxy( player->GetSocket( )->GetErrorString( ) ) + "." );
+-			player->SetGProxyDisconnectNoticeSent( true );
++            player->SetGProxyDisconnectNoticeSent( true );
+ 		}
+ 
+ 		if( GetTime( ) - player->GetLastGProxyWaitNoticeSentTime( ) >= 20 )
+@@ -1574,7 +1574,7 @@ void CBaseGame :: EventPlayerDisconnectSocketError( CGamePlayer *player )
+ 	player->SetLeftCode( PLAYERLEAVE_DISCONNECT );
+ 
+ 	if( !m_GameLoading && !m_GameLoaded )
+-		OpenSlot( GetSIDFromPID( player->GetPID( ) ), false );
++        OpenSlot( GetSIDFromPID( player->GetPID( ) ), false );
+ }
+ 
+ void CBaseGame :: EventPlayerDisconnectConnectionClosed( CGamePlayer *player )
+@@ -1606,7 +1606,7 @@ void CBaseGame :: EventPlayerDisconnectConnectionClosed( CGamePlayer *player )
+ 	player->SetLeftCode( PLAYERLEAVE_DISCONNECT );
+ 
+ 	if( !m_GameLoading && !m_GameLoaded )
+-		OpenSlot( GetSIDFromPID( player->GetPID( ) ), false );
++        OpenSlot( GetSIDFromPID( player->GetPID( ) ), false );
+ }
+ 
+ void CBaseGame :: EventPlayerJoined( CPotentialPlayer *potential, CIncomingJoinPlayer *joinPlayer )
+@@ -2528,6 +2528,12 @@ void CBaseGame :: EventPlayerLeft( CGamePlayer *player, uint32_t reason )
+ 
+ 	if( !m_GameLoading && !m_GameLoaded )
+ 		OpenSlot( GetSIDFromPID( player->GetPID( ) ), false );
++    else {
++        if(! m_GHost->m_AutoBanAll ) {
++            m_AutoBans.push_back( player->GetName( ) );
++            SendAllChat( m_GHost->m_Language->UserMayBanned( player->GetName( ) ) );
++        }
++    }
+ }
+ 
+ void CBaseGame :: EventPlayerLoaded( CGamePlayer *player )
+diff --git a/game_base.h b/game_base.h
+index 0deab91..3d4df9c 100644
+--- a/game_base.h
++++ b/game_base.h
+@@ -125,6 +125,7 @@ class CBaseGame
+ 	bool m_AutoSave;								// if we should auto save the game before someone disconnects
+ 	bool m_MatchMaking;								// if matchmaking mode is enabled
+ 	bool m_LocalAdminMessages;						// if local admin messages should be relayed or not
++    vector<string> m_AutoBans;                      // vector for users who left the game and will be autobanned
+ 
+ public:
+ 	CBaseGame( CGHost *nGHost, CMap *nMap, CSaveGame *nSaveGame, uint16_t nHostPort, unsigned char nGameState, string nGameName, string nOwnerName, string nCreatorName, string nCreatorServer );
+diff --git a/ghost.cpp b/ghost.cpp
+index a4bceec..74e2adb 100644
+--- a/ghost.cpp
++++ b/ghost.cpp
+@@ -1385,6 +1385,7 @@ void CGHost :: SetConfigs( CConfig *CFG )
+ 	m_TCPNoDelay = CFG->GetInt( "tcp_nodelay", 0 ) == 0 ? false : true;
+ 	m_MatchMakingMethod = CFG->GetInt( "bot_matchmakingmethod", 1 );
+ 	m_MapGameType = CFG->GetUInt( "bot_mapgametype", 0 );
++    m_AutoBanAll = CFG->GetInt( "bot_autobanall", 1 ) == 0 ? false : true;
+ }
+ 
+ void CGHost :: ExtractScripts( )
+diff --git a/ghost.h b/ghost.h
+index 8a3d3c1..70eb7f1 100644
+--- a/ghost.h
++++ b/ghost.h
+@@ -134,6 +134,7 @@ class CGHost
+ 	bool m_TCPNoDelay;						// config value: use Nagle's algorithm or not
+ 	uint32_t m_MatchMakingMethod;			// config value: the matchmaking method
+ 	uint32_t m_MapGameType;                 // config value: the MapGameType overwrite (aka: refresh hack)
++    bool m_AutoBanAll;                      // config value: the harsh of the autoban
+ 
+ 	CGHost( CConfig *CFG );
+ 	~CGHost( );
+diff --git a/language.cpp b/language.cpp
+index a92463e..41c47be 100644
+--- a/language.cpp
++++ b/language.cpp
+@@ -1533,3 +1533,10 @@ string CLanguage :: PlayerReconnectedWithGProxy( string name )
+ 	UTIL_Replace( Out, "$NAME$", name );
+ 	return Out;
+ }
++
++string CLanguage :: UserMayBanned( string name )
++{
++    string Out = m_CFG->GetString( "lang_0221", "lang_0221" );
++    UTIL_Replace( Out, "$NAME$", name );
++    return Out;
++}
+diff --git a/language.h b/language.h
+index 835f778..9f39b73 100644
+--- a/language.h
++++ b/language.h
+@@ -254,6 +254,7 @@ class CLanguage
+ 	string WaitForReconnectSecondsRemain( string seconds );
+ 	string WasUnrecoverablyDroppedFromGProxy( );
+ 	string PlayerReconnectedWithGProxy( string name );
++    string UserMayBanned( string name );
+ };
+ 
+ #endif
+diff --git a/../language.cfg b/../language.cfg
+index e7679e5..5d2d793 100644
+--- a/../language.cfg
++++ b/../language.cfg
+@@ -222,3 +222,4 @@ lang_0217 = has lost the connection (connection closed by remote host) but is us
+ lang_0218 = Please wait for me to reconnect ($SECONDS$ seconds remain).
+ lang_0219 = was unrecoverably dropped from GProxy++
+ lang_0220 = Player [$NAME$] reconnected with GProxy++!
++lang_0221 = Player [$NAME$] may be banned after the game.
+-- 
+1.8.5.1
