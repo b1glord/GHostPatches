@@ -182,7 +182,6 @@ index a4bceec..3b080b4 100644
    m_AutoHostOwner = CFG->GetString( "autohost_owner", string( ) );
    m_LastAutoHostTime = GetTime( );
 +	m_LastGameUpdateTime  = GetTime( );
-+	m_LastGameUpdateTime  = GetTime( );
    m_AutoHostMatchMaking = false;
    m_AutoHostMinimumScore = 0.0;
    m_AutoHostMaximumScore = 0.0;
